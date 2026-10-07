@@ -251,8 +251,9 @@ class BridgeTests(unittest.TestCase):
         args='claude --dangerously-skip-permissions --resume old -c --model opus --permission-mode plan -n x --add-dir /tmp'
         ps=subprocess.CompletedProcess([],0,args+'\n','')
         with patch.object(bridge.subprocess,'run',return_value=ps):
-            self.assertEqual(bridge.resume_command(1,'S','fable'),
-                ['claude','--resume','S','--dangerously-skip-permissions','--permission-mode','plan','--add-dir','/tmp','--model','fable'])
+            self.assertEqual(bridge.resume_command(1,'S','fable','xhigh'),
+                ['claude','--resume','S','--dangerously-skip-permissions','--permission-mode','plan','--add-dir','/tmp','--model','fable','--effort','xhigh'])
+            self.assertEqual(bridge.resume_command(1,'S',None,'ultracode')[-1],'/tmp')
     def test_report_counts_each_response_once_per_day_and_project(self):
         folder=Path(self.temp.name)/'home/.claude/projects/p'; folder.mkdir(parents=True)
         line=lambda mid,ts,out:json.dumps({'timestamp':ts,'cwd':'/work/app','requestId':'r'+mid,'message':{'id':mid,'model':'m','usage':{'input_tokens':1,'output_tokens':out}}})

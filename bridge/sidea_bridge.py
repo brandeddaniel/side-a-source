@@ -653,18 +653,23 @@ def session_titles(session):
     return {title for title in titles if title}
 
 
+def session_state(session_id):
+    """Model and effort of the session's latest main-thread reply, from the tail of its transcript."""
+    for line in reversed(transcript_tail(session_id)):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("type") != "assistant" or entry.get("isSidechain"):
+            continue
+        model = (entry.get("message") or {}).get("model")
+        if model and not model.startswith("<"):
+            return model, entry.get("effort")
+    return None, None
+
+
 def session_model(session_id):
-    """The model of the session's latest reply, from the tail of its transcript."""
-    for lines in [transcript_tail(session_id)]:
-        for line in reversed(lines):
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            model = (entry.get("message") or {}).get("model") if entry.get("type") == "assistant" else None
-            if model and not model.startswith("<"):
-                return model
-    return None
+    return session_state(session_id)[0]
 
 
 def live_sessions(root, config):
@@ -764,10 +769,11 @@ def session_terminal(session, records, terminals):
 
 # Flags that pick the conversation or model are replaced; everything else the session started with is kept.
 RESUME_DROPS = {"-c", "--continue", "-p", "--print"}
-RESUME_DROPS_VALUE = {"--model", "--session-id", "-n", "--name"}
+RESUME_DROPS_VALUE = {"--model", "--effort", "--session-id", "-n", "--name"}
+EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
-def resume_command(pid, session_id, model):
+def resume_command(pid, session_id, model, effort=None):
     result = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
     args = result.stdout.split()[1:] if result.returncode == 0 else []
     kept, skip = [], False
@@ -786,7 +792,8 @@ def resume_command(pid, session_id, model):
         if arg.split("=", 1)[0] in RESUME_DROPS_VALUE | {"--resume"}:
             continue
         kept.append(arg)
-    return ["claude", "--resume", session_id, *kept, *(["--model", model] if model else [])]
+    return ["claude", "--resume", session_id, *kept, *(["--model", model] if model else []),
+            *(["--effort", effort] if effort in EFFORTS else [])]
 
 
 def session_action(root, pid, action):
@@ -800,8 +807,11 @@ def session_action(root, pid, action):
         return
     if session.get("status") not in ("idle", "shell"):
         raise ValueError("Wait for the session to finish its turn, then move it.")
-    model = session_model(session["sessionId"])
-    command = resume_command(pid, session["sessionId"], "fable" if model and "fable" in model else None)
+    # Same model and effort as before. Fable goes by its alias so a spent-everywhere remap still applies.
+    model, effort = session_state(session["sessionId"])
+    if model and "fable" in model:
+        model = "fable"
+    command = resume_command(pid, session["sessionId"], model, effort)
     selector = selection_path(root)
     prefix = f"CLAUDE_SECURESTORAGE_CONFIG_DIR={shlex.quote(selector.read_text().strip())} " if selector.exists() else ""
     osascript(GHOSTTY_TYPE, terminal["id"], "/exit")
