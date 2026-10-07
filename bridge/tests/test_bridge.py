@@ -237,6 +237,22 @@ class BridgeTests(unittest.TestCase):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
         self.assertEqual(result,[{'pid':101,'name':'n101','status':'busy','model':'claude-fable-5-1','accountID':b['id']},
                                  {'pid':102,'name':'n102','status':'busy','model':None,'accountID':a['id']}])
+    def test_sessions_are_found_by_title_or_lone_folder_and_never_guessed(self):
+        terms=[{'id':'T1','cwd':'/a','title':'Fix login'},{'id':'T2','cwd':'/a','title':'other'},{'id':'T3','cwd':'/b','title':'zsh'}]
+        a1={'pid':1,'sessionId':'s1','cwd':'/a','name':'a-1'}; a2={'pid':2,'sessionId':'s2','cwd':'/a','name':'a-2'}
+        b1={'pid':3,'sessionId':'s3','cwd':'/b','name':'b-1'}
+        titles={'s1':{'a-1','Fix login'},'s2':{'a-2'},'s3':{'b-1'}}
+        with patch.object(bridge,'session_titles',side_effect=lambda s: titles[s['sessionId']]):
+            self.assertEqual(bridge.session_terminal(a1,[a1,a2,b1],terms)['id'],'T1')
+            self.assertEqual(bridge.session_terminal(b1,[a1,a2,b1],terms)['id'],'T3')
+            # Two tabs in one folder and no title match: refuse rather than type into the wrong one.
+            with self.assertRaisesRegex(ValueError,'Ghostty tab'): bridge.session_terminal(a2,[a1,a2,b1],terms)
+    def test_resume_keeps_the_sessions_own_flags_and_replaces_conversation_and_model(self):
+        args='claude --dangerously-skip-permissions --resume old -c --model opus --permission-mode plan -n x --add-dir /tmp'
+        ps=subprocess.CompletedProcess([],0,args+'\n','')
+        with patch.object(bridge.subprocess,'run',return_value=ps):
+            self.assertEqual(bridge.resume_command(1,'S','fable'),
+                ['claude','--resume','S','--dangerously-skip-permissions','--permission-mode','plan','--add-dir','/tmp','--model','fable'])
     def test_report_counts_each_response_once_per_day_and_project(self):
         folder=Path(self.temp.name)/'home/.claude/projects/p'; folder.mkdir(parents=True)
         line=lambda mid,ts,out:json.dumps({'timestamp':ts,'cwd':'/work/app','requestId':'r'+mid,'message':{'id':mid,'model':'m','usage':{'input_tokens':1,'output_tokens':out}}})

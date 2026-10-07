@@ -192,7 +192,6 @@ struct FableSessions: View {
     @Bindable var store: AccountStore
     var body: some View {
         let sessions = store.sessions.filter(\.onFable)
-        let now = Date().timeIntervalSince1970
         if store.fableToOpus {
             Label("Fable is spent on every account. New commands use Opus.", systemImage: "arrow.triangle.branch")
                 .font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
@@ -203,7 +202,7 @@ struct FableSessions: View {
                 ForEach(sessions) { session in
                     let account = store.config.accounts.first { $0.id == session.accountID }
                     let fable = session.accountID.flatMap { store.usage[$0]?.fable }
-                    let spent = fable.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
+                    let spent = store.fableSpent(session.accountID)
                     HStack(spacing: 6) {
                         Circle().fill(session.status == "busy" ? Color.green : Color.secondary.opacity(0.35)).frame(width: 6, height: 6)
                             .help(session.status ?? "")
@@ -216,12 +215,23 @@ struct FableSessions: View {
                         } else if let fable {
                             Text("fb \(Int(fable.percent.rounded()))%").foregroundStyle(.secondary).monospacedDigit()
                         }
+                        if store.actingOn.contains(session.pid) {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Menu {
+                                Button("Switch to Opus") { Task { await store.act(on: session.pid, .opus) } }
+                                if let target = store.active, target.id != session.accountID {
+                                    Button("Move to \(target.name)") { Task { await store.act(on: session.pid, .move) } }
+                                        .disabled(session.status != "idle" || !store.shellSwitching)
+                                }
+                            } label: { Image(systemName: "ellipsis.circle") }
+                                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                                .help("Types into this session's Ghostty tab")
+                        }
                     }.font(.system(size: 11))
                 }
-                if sessions.contains(where: { session in
-                    session.accountID.flatMap { store.usage[$0]?.fable }.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
-                }) {
-                    Text("Running sessions keep their account. Exit one and run claude -c to continue it on Side A's current pick.")
+                if !store.fixFableSessions && sessions.contains(where: { store.fableSpent($0.accountID) }) {
+                    Text("Use ⋯ to move a session or switch it to Opus, or turn on fixing Fable sessions in Autopilot settings.")
                         .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }

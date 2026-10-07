@@ -36,6 +36,14 @@ final class AccountStore {
     /// Opt-in `fallbackModel` in Claude Code's settings.
     var opusFallback = false
     var sessions: [LiveSession] = []
+    /// Sessions Side A is typing into right now.
+    var actingOn: Set<Int> = []
+    /// Opt-in: when a Fable session's account runs out of Fable, move it to an account with Fable
+    /// left, or switch it to Opus when none has any, by typing into its Ghostty tab.
+    var fixFableSessions = UserDefaults.standard.bool(forKey: "sidea.fixFableSessions") {
+        didSet { UserDefaults.standard.set(fixFableSessions, forKey: "sidea.fixFableSessions") }
+    }
+    @ObservationIgnored private var fixedAt: [Int: Date] = [:]
     @ObservationIgnored private var reportAt = Date.distantPast
     @ObservationIgnored private var limitMarkerDate: Date?
     var usage: [String: AccountUsage] = [:]
@@ -475,6 +483,38 @@ final class AccountStore {
             if state.installed { notify("Fable is spent on every account", "New claude commands use Opus for Fable until a Fable limit resets.") }
         }
     }
+    enum SessionAction: String { case opus, move }
+    /// Types into the session's Ghostty tab: `/model opus`, or `/exit` and a resume on the current account.
+    @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true) async -> Bool {
+        guard !isDemo, !actingOn.contains(pid) else { return false }
+        actingOn.insert(pid); defer { actingOn.remove(pid) }
+        do { _ = try await bridgeOutput(["session", String(pid), action.rawValue], timeout: 60) }
+        catch { if reportError { self.error = error.localizedDescription }; return false }
+        try? await Task.sleep(for: .seconds(2))
+        await refreshSessions()
+        return true
+    }
+    func fableSpent(_ accountID: String?) -> Bool {
+        let now = Date().timeIntervalSince1970
+        return accountID.flatMap { usage[$0]?.fable }.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
+    }
+    /// Idle Fable sessions on an account with no Fable left: move them to the account new commands
+    /// use when it has Fable, otherwise switch them to Opus. Each session is tried once per 10 minutes.
+    private func fixFableSessions(fableSpentEverywhere: Bool) async {
+        guard fixFableSessions else { return }
+        let target = activeIDs[.claude]
+        for session in sessions where session.onFable && session.status == "idle" && fableSpent(session.accountID)
+            && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
+            fixedAt[session.pid] = Date()
+            let move = !fableSpentEverywhere && shellSwitching && target != nil && target != session.accountID && !fableSpent(target)
+            if await act(on: session.pid, move ? .move : .opus, reportError: false) {
+                let name = session.name ?? "A Fable session"
+                let account = config.accounts.first { $0.id == target }?.name ?? "another account"
+                notify(move ? "Moved \(name) to \(account)" : "Switched \(name) to Opus",
+                       move ? "Its account ran out of Fable; the conversation continues where it was." : "No account has Fable left until a limit resets.")
+            }
+        }
+    }
     func refreshSessions() async {
         guard !isDemo, let data = try? await bridgeOutput(["sessions"]),
               let value = try? JSONDecoder().decode([LiveSession].self, from: data) else { return }
@@ -526,6 +566,7 @@ final class AccountStore {
                     notify("Switched to \(name)", from.map { "\($0) is near its limit or has less quota at risk." } ?? "Autopilot picked the account with the most quota at risk.")
                 }
             }
+            if provider == .claude { await fixFableSessions(fableSpentEverywhere: pick.fableSpent) }
             if provider == .claude, let next = Planner.nextAvailable(accounts, usage: plannable, now: now), Planner.best(accounts, usage: plannable, active: nil, now: now, ignoringModelLimits: true) == nil {
                 if !exhaustedNotified {
                     exhaustedNotified = true

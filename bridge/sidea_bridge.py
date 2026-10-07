@@ -627,13 +627,35 @@ def opus_fallback_installed():
 PROFILE_IN_ENV = re.compile(r"CLAUDE_SECURESTORAGE_CONFIG_DIR=(\S.*?/profiles/([0-9a-f-]{36}))")
 
 
-def session_model(session_id):
-    """The model of the session's latest reply, from the tail of its transcript."""
+def transcript_tail(session_id):
     for path in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
         with open(path, "rb") as stream:
             stream.seek(0, os.SEEK_END)
             stream.seek(max(0, stream.tell() - 262144))
-            lines = stream.read().splitlines()
+            return stream.read().splitlines()
+    return []
+
+
+def session_titles(session):
+    """Names a session's terminal title may show: its registry name and its latest custom or AI title."""
+    titles = {session.get("name")}
+    found = set()
+    for line in reversed(transcript_tail(session["sessionId"])):
+        for kind, key in (("custom-title", "customTitle"), ("ai-title", "aiTitle")):
+            if kind not in found and f'"{kind}"'.encode() in line:
+                try:
+                    titles.add(json.loads(line).get(key))
+                    found.add(kind)
+                except ValueError:
+                    pass
+        if len(found) == 2:
+            break
+    return {title for title in titles if title}
+
+
+def session_model(session_id):
+    """The model of the session's latest reply, from the tail of its transcript."""
+    for lines in [transcript_tail(session_id)]:
         for line in reversed(lines):
             try:
                 entry = json.loads(line)
@@ -674,6 +696,127 @@ def live_sessions(root, config):
     return sorted(sessions, key=lambda item: item["pid"])
 
 
+GHOSTTY_LIST = """on run argv
+    if application "Ghostty" is not running then return ""
+    set out to ""
+    set sep to character id 9 -- inside the tell block, `tab` is Ghostty's tab class
+    tell application "Ghostty"
+        repeat with t in terminals
+            set out to out & (id of t) & sep & (working directory of t) & sep & (name of t) & linefeed
+        end repeat
+    end tell
+    return out
+end run"""
+
+GHOSTTY_TYPE = """on run argv
+    tell application "Ghostty"
+        set t to first terminal whose id is (item 1 of argv)
+        input text (item 2 of argv) to t
+        send key "enter" to t
+    end tell
+end run"""
+
+
+def osascript(script, *args):
+    result = subprocess.run(["osascript", "-", *args], input=script, capture_output=True, text=True, timeout=20)
+    if result.returncode != 0:
+        if "-1743" in result.stderr:
+            raise ValueError("Allow Side A to control Ghostty in System Settings > Privacy & Security > Automation.")
+        raise ValueError("Ghostty did not respond.")
+    return result.stdout
+
+
+def ghostty_terminals():
+    terminals = []
+    for line in osascript(GHOSTTY_LIST).splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            # Claude Code prefixes its title with a status glyph (e.g. "✳ name").
+            terminals.append({"id": parts[0], "cwd": parts[1], "title": re.sub(r"^\W+\s", "", parts[2]).strip()})
+    return terminals
+
+
+def session_record(pid):
+    data = read_json(Path.home() / ".claude" / "sessions" / f"{pid}.json", None)
+    if not isinstance(data, dict) or data.get("pid") != pid or not isinstance(data.get("sessionId"), str):
+        raise ValueError("That session is no longer running.")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise ValueError("That session is no longer running.") from None
+    except PermissionError:
+        pass
+    return data
+
+
+def session_terminal(session, records, terminals):
+    """The Ghostty terminal running a session: its title is the session name and its folder matches.
+    Otherwise the only terminal in that folder, when only one session runs there."""
+    same_folder = [t for t in terminals if t["cwd"] == session.get("cwd")]
+    titles = session_titles(session)
+    named = [t for t in same_folder if t["title"] in titles]
+    if len(named) == 1:
+        return named[0]
+    if len(same_folder) == 1 and sum(r.get("cwd") == session.get("cwd") for r in records) == 1:
+        return same_folder[0]
+    raise ValueError("Couldn't find this session's Ghostty tab.")
+
+
+# Flags that pick the conversation or model are replaced; everything else the session started with is kept.
+RESUME_DROPS = {"-c", "--continue", "-p", "--print"}
+RESUME_DROPS_VALUE = {"--model", "--session-id", "-n", "--name"}
+
+
+def resume_command(pid, session_id, model):
+    result = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
+    args = result.stdout.split()[1:] if result.returncode == 0 else []
+    kept, skip = [], False
+    for index, arg in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if arg in RESUME_DROPS:
+            continue
+        if arg in RESUME_DROPS_VALUE:
+            skip = True
+            continue
+        if arg in ("-r", "--resume"):
+            skip = index + 1 < len(args) and not args[index + 1].startswith("-")
+            continue
+        if arg.split("=", 1)[0] in RESUME_DROPS_VALUE | {"--resume"}:
+            continue
+        kept.append(arg)
+    return ["claude", "--resume", session_id, *kept, *(["--model", model] if model else [])]
+
+
+def session_action(root, pid, action):
+    """Switches a running session to Opus (`/model opus`), or moves it to the account new commands
+    use now: `/exit`, then resume the same conversation in the same tab."""
+    session = session_record(pid)
+    records = [r for r in (read_json(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
+    terminal = session_terminal(session, records, ghostty_terminals())
+    if action == "opus":
+        osascript(GHOSTTY_TYPE, terminal["id"], "/model opus")
+        return
+    if session.get("status") not in ("idle", "shell"):
+        raise ValueError("Wait for the session to finish its turn, then move it.")
+    model = session_model(session["sessionId"])
+    command = resume_command(pid, session["sessionId"], "fable" if model and "fable" in model else None)
+    selector = selection_path(root)
+    prefix = f"CLAUDE_SECURESTORAGE_CONFIG_DIR={shlex.quote(selector.read_text().strip())} " if selector.exists() else ""
+    osascript(GHOSTTY_TYPE, terminal["id"], "/exit")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.3)
+    else:
+        raise ValueError("The session did not exit; nothing else was typed.")
+    osascript(GHOSTTY_TYPE, terminal["id"], prefix + " ".join(shlex.quote(part) for part in command))
+
+
 def limit_hook_installed():
     settings = read_json(Path.home() / ".claude" / "settings.json", {}) or {}
     return any(HOOK_MARK in h.get("command", "") for g in (settings.get("hooks") or {}).get("StopFailure", []) for h in g.get("hooks", []))
@@ -697,6 +840,9 @@ def main():
     commands.add_parser("fable").add_argument("state", choices=["on", "off", "status"])
     commands.add_parser("fallback").add_argument("state", choices=["on", "off", "status"])
     commands.add_parser("sessions")
+    action = commands.add_parser("session")
+    action.add_argument("pid", type=int)
+    action.add_argument("action", choices=["opus", "move"])
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     os.umask(0o077)
@@ -712,6 +858,9 @@ def main():
         if args.state != "status":
             set_shell(root, args.state == "on")
         print(json.dumps({"installed": shell_installed(root)}))
+        return
+    if args.command == "session":
+        session_action(root, args.pid, args.action)
         return
     if args.command == "fable":
         if args.state != "status":
