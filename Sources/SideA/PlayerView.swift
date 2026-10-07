@@ -51,7 +51,8 @@ struct PlayerView: View {
         if store.config.accounts.isEmpty { return "OPEN TO ADD ACCOUNT" }
         guard let selected = store.selected, selected.ready else { return "OPEN TO FINISH SIGN-IN" }
         let usage = store.usage[selected.id]
-        let levels = [usage?.fiveHour.map { "5H \(Int($0.percent.rounded()))%" }, usage?.weekly.map { "WK \(Int($0.percent.rounded()))%" }]
+        let levels = [usage?.fiveHour.map { "5H \(Int($0.percent.rounded()))%" }, usage?.weekly.map { "WK \(Int($0.percent.rounded()))%" },
+                      usage?.fable.map { "FB \(Int($0.percent.rounded()))%" }]
             .compactMap { $0 }.joined(separator: " ")
         if store.isActive(selected) { return levels.isEmpty ? "ACTIVE ON THIS MAC" : "ACTIVE / " + levels }
         if levels.isEmpty { return "PLAY TO USE ON THIS MAC" }

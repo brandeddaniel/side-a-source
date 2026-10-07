@@ -40,10 +40,10 @@ struct SideAApp: App {
         .menuBarExtraStyle(.window)
         Settings { SettingsView(store: store) }
     }
-    /// The active Claude account's tightest limit: 5-hour or weekly, whichever is closer.
+    /// The active Claude account's tightest limit: 5-hour, weekly or a model's weekly (Fable), whichever is closer.
     private var menuPercent: Int? {
         guard let account = store.active, let usage = store.usage[account.id] else { return nil }
-        let percents = [usage.fiveHour, usage.weekly].compactMap { $0?.percent }
+        let percents = ([usage.fiveHour].compactMap { $0 } + usage.weeklyLimits).map(\.percent)
         return percents.max().map { Int($0.rounded()) }
     }
     static func gauge(_ percent: Int) -> String {

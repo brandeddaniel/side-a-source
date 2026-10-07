@@ -108,6 +108,19 @@ import Testing
     #expect(Planner.nextAvailable([soon, full], usage: nearly, now: now)?.1 == now + 600)
 }
 
+@Test func fullFableWeeklyLimitBlocksLikeTheOverallWeeklyLimit() {
+    let now = 1_000_000.0
+    let window = { (id: String, percent: Double) in UsageWindow(id: id, label: id, percent: percent, resetsAt: now + 86_400) }
+    let fableFull = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 40), window("seven_day_model:fable", 98)])
+    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 60), window("seven_day_model:fable", 30)])
+    #expect(fableFull.fable?.percent == 98)
+    #expect(!Planner.hasHeadroom(fableFull, now: now))
+    #expect(Planner.hasHeadroom(roomy, now: now))
+    let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
+    #expect(Planner.best([a, b], usage: [a.id: fableFull, b.id: roomy], active: a.id, now: now) == b.id)
+    #expect(Planner.nextAvailable([a], usage: [a.id: fableFull], now: now)?.1 == now + 86_400)
+}
+
 @Test func scheduleIgnoresLightOvernightAgentTraffic() {
     // A real 14-day histogram: overnight agents run at up to 13% of the peak.
     let hours = [1095, 1542, 1584, 1586, 2286, 457, 289, 287, 16888, 20207, 18177, 15070, 14568, 18778,

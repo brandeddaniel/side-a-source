@@ -138,6 +138,18 @@ class BridgeTests(unittest.TestCase):
             post.side_effect=bridge.urllib.error.HTTPError(bridge.USAGE_URL,401,'',{},None)
             with self.assertRaisesRegex(ValueError,'Sign in to Alpha'): bridge.claude_usage(self.root,config,a)
         self.assertFalse(hasattr(bridge,'write_secret'))
+    def test_model_scoped_weekly_limits_become_their_own_windows(self):
+        data={'limits':[{'kind':'session','percent':74,'resets_at':'2026-10-07T05:39:59Z'},
+                        {'kind':'weekly_all','percent':20,'resets_at':'2026-10-13T22:59:59Z'},
+                        {'kind':'weekly_scoped','percent':35,'resets_at':'2026-10-13T22:59:59Z',
+                         'scope':{'model':{'id':None,'display_name':'Fable'},'surface':None}},
+                        {'kind':'weekly_scoped','percent':50,'scope':{'model':{'display_name':'Opus'}}},
+                        {'kind':'weekly_scoped','percent':9,'scope':None}]}
+        windows=bridge.model_windows(data,{'Weekly Opus'})
+        self.assertEqual(windows,[{'id':'seven_day_model:fable','label':'Weekly Fable','percent':35.0,
+                                   'resetsAt':bridge.epoch('2026-10-13T22:59:59Z')}])
+        self.assertEqual(bridge.model_windows({'limits':None},set()),[])
+
     def test_shell_switch_survives_path_aliases_and_upgrades_the_old_function(self):
         home=self.root/'home'; home.mkdir(); rc=home/'.zshrc'
         fake=self.root/'bin'; fake.mkdir(); (fake/'claude').write_text('#!/bin/sh\necho "${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}|$*"\n'); (fake/'claude').chmod(0o755)

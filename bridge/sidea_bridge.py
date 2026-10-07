@@ -315,7 +315,26 @@ def claude_usage(root, config, account):
     windows = [{"id": key, "label": label, "percent": float(data[key].get("utilization") or 0),
                 "resetsAt": epoch(data[key].get("resets_at"))}
                for key, label in WINDOW_LABELS.items() if isinstance(data.get(key), dict)]
+    windows += model_windows(data, {window["label"] for window in windows})
     return {"windows": windows, "stale": False, "capacity": plan_capacity(oauth)}
+
+
+def model_windows(data, seen):
+    """Weekly limits scoped to one model (e.g. Fable), which the usage endpoint reports only
+    in its `limits` list. Each stops that model on its own, before the overall weekly limit."""
+    windows = []
+    for limit in data.get("limits") or []:
+        if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+            continue
+        model = ((limit.get("scope") or {}).get("model") or {})
+        name = str(model.get("display_name") or model.get("id") or "").strip()
+        label = f"Weekly {name}"
+        if not name or label in seen:
+            continue
+        seen.add(label)
+        windows.append({"id": "seven_day_model:" + name.casefold(), "label": label,
+                        "percent": float(limit.get("percent") or 0), "resetsAt": epoch(limit.get("resets_at"))})
+    return windows
 
 
 def plan_capacity(oauth):

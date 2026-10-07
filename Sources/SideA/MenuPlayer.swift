@@ -100,7 +100,7 @@ struct ProviderSection: View {
         let accounts = store.config.accounts.filter { $0.provider == provider }
         let now = Date().timeIntervalSince1970
         let limited = accounts.filter { account in
-            !store.isActive(account) && (store.usage[account.id]?.weekly).map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } == true
+            !store.isActive(account) && (store.usage[account.id]?.weeklyLimits ?? []).contains { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }
         }
         if !accounts.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
@@ -116,7 +116,7 @@ struct ProviderSection: View {
                             Image(systemName: "chevron.right").rotationEffect(.degrees(showLimited ? 90 : 0))
                                 .animation(.easeOut(duration: 0.15), value: showLimited)
                             Text("Limited (\(limited.count))")
-                            if let reset = limited.compactMap({ store.usage[$0.id]?.weekly?.resetsAt }).min() {
+                            if let reset = limited.compactMap({ store.usage[$0.id]?.weeklyLimits.filter { $0.percent >= Planner.full }.compactMap(\.resetsAt).max() }).min() {
                                 Text("· next back \(UsageBar.format(reset))").foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -146,8 +146,10 @@ struct AccountUsageRow: View {
             }
             Spacer(minLength: 4)
             if let usage {
-                MiniBar(label: "5h", window: usage.fiveHour)
-                MiniBar(label: "wk", window: usage.weekly)
+                let width: CGFloat = usage.fable == nil ? 46 : 36
+                MiniBar(label: "5h", window: usage.fiveHour, width: width)
+                MiniBar(label: "wk", window: usage.weekly, width: width)
+                if let fable = usage.fable { MiniBar(label: "fb", window: fable, width: width) }
             }
             Group {
                 if !account.ready {
@@ -174,7 +176,7 @@ struct AccountUsageRow: View {
         if usage.stale { return "Sign in again" }
         if let minutes = store.minutesToLimit(account.id), minutes < 300 { return "Limit in ~\(Self.duration(minutes))" }
         let now = Date().timeIntervalSince1970
-        if let blocked = [usage.fiveHour, usage.weekly].compactMap({ $0 }).filter({ $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }).compactMap(\.resetsAt).max() {
+        if let blocked = ([usage.fiveHour].compactMap({ $0 }) + usage.weeklyLimits).filter({ $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }).compactMap(\.resetsAt).max() {
             return "Back \(UsageBar.format(blocked))"
         }
         return nil
@@ -185,15 +187,16 @@ struct AccountUsageRow: View {
 struct MiniBar: View {
     let label: String
     let window: UsageWindow?
+    var width: CGFloat = 46
     var body: some View {
         let percent = min(max(window?.percent ?? 0, 0), 100)
         VStack(alignment: .trailing, spacing: 2) {
             Text(window.map { "\(label) \(Int($0.percent.rounded()))%" } ?? "\(label) –")
                 .font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
-            Capsule().fill(.quaternary).frame(width: 46, height: 4)
+            Capsule().fill(.quaternary).frame(width: width, height: 4)
                 .overlay(alignment: .leading) {
                     Capsule().fill(percent >= Planner.full ? Color.red : percent >= 75 ? .orange : .accentColor)
-                        .frame(width: 46 * percent / 100, height: 4)
+                        .frame(width: width * percent / 100, height: 4)
                 }
         }
         .help(window?.resetsAt.map { "\(window?.label ?? label) resets \(UsageBar.format($0))" } ?? "")

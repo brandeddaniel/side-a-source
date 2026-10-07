@@ -43,12 +43,20 @@ struct AccountsSettings: View {
                     }
                 }
             }
-            Section("Accounts") {
+            Section {
                 if store.config.accounts.isEmpty {
                     Text("No accounts yet. Add one below.").foregroundStyle(.secondary)
                 }
                 ForEach(store.config.accounts) { account in
                     AccountSettingsRow(store: store, account: account, removing: $removing)
+                }
+            } header: {
+                HStack {
+                    Text("Accounts")
+                    Spacer()
+                    let signedIn = store.config.accounts.filter(\.ready).count
+                    Text("\(signedIn) of \(store.config.accounts.count) signed in")
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
             Section("Add account") {

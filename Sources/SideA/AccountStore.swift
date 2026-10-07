@@ -401,7 +401,7 @@ final class AccountStore {
     private func dueForRead(_ account: Account) -> Bool {
         let now = Date().timeIntervalSince1970
         if !isActive(account), let value = usage[account.id], !value.stale,
-           let reset = [value.fiveHour, value.weekly].compactMap({ $0 }).filter({ $0.percent >= Planner.full }).compactMap(\.resetsAt).max(),
+           let reset = ([value.fiveHour].compactMap({ $0 }) + value.weeklyLimits).filter({ $0.percent >= Planner.full }).compactMap(\.resetsAt).max(),
            reset > now {
             return false
         }

@@ -86,6 +86,10 @@ public struct AccountUsage: Codable, Equatable, Sendable {
     }
     public var fiveHour: UsageWindow? { windows.first { $0.id == "five_hour" } }
     public var weekly: UsageWindow? { windows.first { $0.id == "seven_day" } }
+    /// Fable's own weekly limit; when full it stops Fable sessions even with overall weekly room left.
+    public var fable: UsageWindow? { windows.first { $0.id == "seven_day_model:fable" } }
+    /// The overall weekly limit and every model-scoped weekly limit; any full one stops work.
+    public var weeklyLimits: [UsageWindow] { windows.filter { $0.id == "seven_day" || $0.id.hasPrefix("seven_day_model:") } }
 }
 
 public struct TokenRow: Codable, Equatable, Sendable {
@@ -171,8 +175,13 @@ public enum Planner {
         return window
     }
 
+    /// The fullest live weekly limit, overall or model-scoped.
+    static func tightestWeekly(_ usage: AccountUsage, _ now: Double) -> UsageWindow? {
+        usage.weeklyLimits.compactMap { live($0, now) }.max { $0.percent < $1.percent }
+    }
+
     public static func hasHeadroom(_ usage: AccountUsage, now: Double) -> Bool {
-        (live(usage.fiveHour, now)?.percent ?? 0) < full && (live(usage.weekly, now)?.percent ?? 0) < full
+        (live(usage.fiveHour, now)?.percent ?? 0) < full && (tightestWeekly(usage, now)?.percent ?? 0) < full
     }
 
     /// Weekly quota (in Pro-plan percent) that must be used per hour to avoid losing it at reset.
@@ -188,8 +197,8 @@ public enum Planner {
         candidates.filter { $0.ready }.compactMap { account -> (Account, Double)? in
             guard let value = usage[account.id] else { return nil }
             // Same bars as switching: a 5-hour window counts as blocked from the switch target.
-            let blocking = [live(value.fiveHour, now).flatMap { $0.percent >= switchTarget ? $0 : nil },
-                            live(value.weekly, now).flatMap { $0.percent >= full ? $0 : nil }].compactMap { $0 }
+            let blocking = [live(value.fiveHour, now).flatMap { $0.percent >= switchTarget ? $0 : nil }].compactMap { $0 }
+                + value.weeklyLimits.compactMap { live($0, now) }.filter { $0.percent >= full }
             guard let reset = blocking.compactMap(\.resetsAt).max() else { return nil }
             return (account, reset)
         }.min { $0.1 < $1.1 }
@@ -225,7 +234,7 @@ public enum Planner {
         guard account.ready, account.allowAuto, let usage, !usage.stale else { return false }
         // A plan with no 5-hour window has nothing to start.
         guard account.provider == .claude || usage.fiveHour != nil else { return false }
-        return live(usage.fiveHour, now) == nil && (live(usage.weekly, now)?.percent ?? 0) < full
+        return live(usage.fiveHour, now) == nil && (tightestWeekly(usage, now)?.percent ?? 0) < full
     }
 }
 
