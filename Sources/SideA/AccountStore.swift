@@ -54,6 +54,10 @@ final class AccountStore {
     /// Accounts whose latest read failed for a reason other than being idle. They keep their
     /// last bars on screen but are left out of Autopilot until a read succeeds.
     @ObservationIgnored private var failing: Set<String> = []
+    /// When each failing account's reads started failing. A brief failure is a hiccup; one that lasts
+    /// means its real limits are unknown, so Autopilot may move the Mac off it.
+    @ObservationIgnored private var failingSince: [String: Date] = [:]
+    func readsFailing(_ id: String) -> Bool { failing.contains(id) }
     @ObservationIgnored private var reading: Set<String> = []
     /// Bumped by every switch, so an "active" answer that started earlier cannot overwrite it.
     @ObservationIgnored private var selectionGeneration = 0
@@ -127,6 +131,7 @@ final class AccountStore {
             // Readings from before model-scoped limits (Fable) were tracked are re-read at once.
             usage = cache.usage; usageAt = cache.modelLimits == true ? cache.at : [:]
             backoffUntil = cache.backoff ?? [:]; primedAt = cache.primed ?? [:]; failing = Set(cache.failing ?? [])
+            for id in failing { failingSince[id] = .distantPast }
             activeIDs = (cache.active ?? [:]).reduce(into: [:]) { ids, item in AgentProvider(rawValue: item.key).map { ids[$0] = item.value } }
         }
         if !isDemo {
@@ -366,7 +371,7 @@ final class AccountStore {
         do {
             let value = try JSONDecoder().decode(AccountUsage.self, from: try await bridgeOutput(["usage", id]))
             usage[id] = value
-            failing.remove(id)
+            failing.remove(id); failingSince[id] = nil
             let now = Date().timeIntervalSince1970
             if let five = value.fiveHour {
                 // A drop means the window reset; the old pace no longer applies.
@@ -384,6 +389,7 @@ final class AccountStore {
                 let signIn = message.contains("Sign in")
                 backoffUntil[id] = Date().addingTimeInterval(signIn ? 1800 : message.contains("429") ? 600 : 300)
                 failing.insert(id)
+                if failingSince[id] == nil { failingSince[id] = Date() }
                 if signIn { usage[id]?.stale = true }
             }
         }
@@ -554,7 +560,8 @@ final class AccountStore {
             let accounts = config.accounts.filter { $0.provider == provider }
             let current = activeIDs[provider]
             // A failed read is not evidence of a limit; only a signed-out active account moves.
-            if let current, failing.contains(current), usage[current]?.stale != true { continue }
+            if let current, failing.contains(current), usage[current]?.stale != true,
+               Date().timeIntervalSince(failingSince[current] ?? Date()) < 600 { continue }
             // An account with Autopilot off is never switched away from automatically.
             if let current, config.accounts.first(where: { $0.id == current })?.allowAuto == false { continue }
             let pick = Planner.pick(accounts, usage: plannable, active: current, now: now)

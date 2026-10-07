@@ -177,6 +177,7 @@ struct AccountUsageRow: View {
         guard account.ready else { return "Not signed in" }
         guard let usage = store.usage[account.id] else { return "Reading…" }
         if usage.stale { return "Sign in again" }
+        if store.readsFailing(account.id) { return "Can't read limits; numbers may be old" }
         if let minutes = store.minutesToLimit(account.id), minutes < 300 { return "Limit in ~\(Self.duration(minutes))" }
         let now = Date().timeIntervalSince1970
         if let blocked = ([usage.fiveHour].compactMap({ $0 }) + usage.weeklyLimits).filter({ $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }).compactMap(\.resetsAt).max() {
