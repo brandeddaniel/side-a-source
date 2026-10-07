@@ -146,10 +146,12 @@ struct AccountUsageRow: View {
             }
             Spacer(minLength: 4)
             if let usage {
-                let width: CGFloat = usage.fable == nil ? 46 : 36
+                // Claude accounts always get a Fable column so rows line up; "fb –" until it is reported.
+                let showFable = account.provider == .claude || usage.fable != nil
+                let width: CGFloat = showFable ? 36 : 46
                 MiniBar(label: "5h", window: usage.fiveHour, width: width)
                 MiniBar(label: "wk", window: usage.weekly, width: width)
-                if let fable = usage.fable { MiniBar(label: "fb", window: fable, width: width) }
+                if showFable { MiniBar(label: "fb", window: usage.fable, width: width) }
             }
             Group {
                 if !account.ready {

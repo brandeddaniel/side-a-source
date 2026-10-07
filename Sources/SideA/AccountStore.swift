@@ -111,7 +111,8 @@ final class AccountStore {
         }
         if !isDemo, let cache = try? PrivateFile.read(UsageCache.self, from: usageCacheURL) {
             // Show the last numbers at once and keep each account on its normal polling schedule.
-            usage = cache.usage; usageAt = cache.at
+            // Readings from before model-scoped limits (Fable) were tracked are re-read at once.
+            usage = cache.usage; usageAt = cache.modelLimits == true ? cache.at : [:]
             backoffUntil = cache.backoff ?? [:]; primedAt = cache.primed ?? [:]; failing = Set(cache.failing ?? [])
             activeIDs = (cache.active ?? [:]).reduce(into: [:]) { ids, item in AgentProvider(rawValue: item.key).map { ids[$0] = item.value } }
         }
@@ -387,13 +388,14 @@ final class AccountStore {
         var usage: [String: AccountUsage]; var at: [String: Date]
         var backoff: [String: Date]?; var primed: [String: Date]?
         var active: [String: String]?; var failing: [String]?
+        var modelLimits: Bool?
     }
     private var reportURL: URL { root.appendingPathComponent("runtime/report.json") }
     private var usageCacheURL: URL { root.appendingPathComponent("runtime/usage-cache.json") }
     private func saveUsageCache() {
         try? PrivateFile.write(UsageCache(usage: usage, at: usageAt, backoff: backoffUntil, primed: primedAt,
                                           active: Dictionary(uniqueKeysWithValues: activeIDs.map { ($0.key.rawValue, $0.value) }),
-                                          failing: Array(failing)),
+                                          failing: Array(failing), modelLimits: true),
                                to: usageCacheURL)
     }
     /// Active accounts change fastest. An idle account at a limit cannot change until that
