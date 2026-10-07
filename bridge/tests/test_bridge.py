@@ -170,6 +170,8 @@ class BridgeTests(unittest.TestCase):
                                        capture_output=True,text=True).stdout.strip()
             selector.write_text('/profiles/x\n')
             self.assertEqual(run(),'/profiles/x|--version')
+            # Review: `source ~/.zshrc && claude` ran before preexec existed and used the Mac login.
+            self.assertEqual(subprocess.run(['zsh','-fc',f"source {rc} && {fake}/claude --version"],capture_output=True,text=True).stdout.strip(),'/profiles/x|--version')
             # Review: the Mac login must be selected explicitly (empty), or an exported
             # CLAUDE_CONFIG_DIR would pick that directory's login instead.
             selector.write_text('\n')

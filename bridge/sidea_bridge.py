@@ -386,13 +386,14 @@ def shell_snippet(root):
     # A preexec hook, not a `claude` function: an alias to a path (claude=~/.claude/local/claude)
     # would skip a function, but every command runs after preexec. One line, so removal stays simple.
     # The fable alias is remapped only while Side A asks for it, and only unset if Side A set it.
+    # It also runs once when sourced: preexec for `source ~/.zshrc && claude` fired before the hook existed.
     return (f"{SHELL_MARK}\n"
             f"_side_a_select() {{ local d m; d=\"$(cat {selector} 2>/dev/null)\"; "
             f"[ -f {selector} ] && export CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$d\" || unset CLAUDE_SECURESTORAGE_CONFIG_DIR; "
             f"m=\"$(cat {fable} 2>/dev/null)\"; "
             f"if [ -n \"$m\" ]; then export ANTHROPIC_DEFAULT_FABLE_MODEL=\"$m\" _SIDE_A_FABLE=1; "
             f"elif [ -n \"$_SIDE_A_FABLE\" ]; then unset ANTHROPIC_DEFAULT_FABLE_MODEL _SIDE_A_FABLE; fi; }}; "
-            f"autoload -Uz add-zsh-hook && add-zsh-hook preexec _side_a_select\n")
+            f"autoload -Uz add-zsh-hook && add-zsh-hook preexec _side_a_select && _side_a_select\n")
 
 
 # While every account's Fable limit is spent, new `claude` commands resolve the fable alias to this.
