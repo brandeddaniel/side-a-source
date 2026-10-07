@@ -696,7 +696,9 @@ def live_sessions(root, config):
                 except (ValueError, OSError):
                     mac = ""
             account = mac or None
+        since = data.get("statusUpdatedAt")
         sessions.append({"pid": pid, "name": data.get("name"), "status": data.get("status"),
+                         "statusSince": since / 1000 if isinstance(since, (int, float)) else None,
                          "model": session_model(data["sessionId"]), "accountID": account})
     return sorted(sessions, key=lambda item: item["pid"])
 
@@ -711,6 +713,13 @@ GHOSTTY_LIST = """on run argv
         end repeat
     end tell
     return out
+end run"""
+
+GHOSTTY_FOCUS = """on run argv
+    tell application "Ghostty"
+        activate
+        focus (first terminal whose id is (item 1 of argv))
+    end tell
 end run"""
 
 GHOSTTY_TYPE = """on run argv
@@ -802,6 +811,9 @@ def session_action(root, pid, action):
     session = session_record(pid)
     records = [r for r in (read_json(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
     terminal = session_terminal(session, records, ghostty_terminals())
+    if action == "focus":
+        osascript(GHOSTTY_FOCUS, terminal["id"])
+        return
     if action == "opus":
         osascript(GHOSTTY_TYPE, terminal["id"], "/model opus")
         return
@@ -852,7 +864,7 @@ def main():
     commands.add_parser("sessions")
     action = commands.add_parser("session")
     action.add_argument("pid", type=int)
-    action.add_argument("action", choices=["opus", "move"])
+    action.add_argument("action", choices=["opus", "move", "focus"])
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     os.umask(0o077)

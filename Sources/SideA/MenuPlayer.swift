@@ -208,9 +208,13 @@ struct FableSessions: View {
                         Circle().fill(session.status == "busy" ? Color.green : Color.secondary.opacity(0.35)).frame(width: 6, height: 6)
                             .help(session.status ?? "")
                         Text(session.name ?? "pid \(session.pid)").lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(store.isStuckOnFable(session) ? Color.orange : Color.primary)
                         Spacer(minLength: 4)
                         Text(account?.name ?? "Unknown account").foregroundStyle(.secondary).lineLimit(1)
-                        if spent {
+                        if store.isStuckOnFable(session) {
+                            Button("Show") { Task { await store.act(on: session.pid, .focus) } }
+                                .controlSize(.mini).help("Bring this session's Ghostty tab to the front; it needs your answer")
+                        } else if spent {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                                 .help("This account's Fable limit is spent. Exit the session and run claude -c to continue on the account Side A picks now.")
                         } else if let fable {

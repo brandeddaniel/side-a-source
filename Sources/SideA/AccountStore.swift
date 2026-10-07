@@ -44,6 +44,11 @@ final class AccountStore {
         didSet { UserDefaults.standard.set(fixFableSessions, forKey: "sidea.fixFableSessions") }
     }
     @ObservationIgnored private var fixedAt: [Int: Date] = [:]
+    /// Fable sessions already reported as stuck, until they move on.
+    @ObservationIgnored private var stuckNotified: Set<Int> = []
+    func isStuckOnFable(_ session: LiveSession) -> Bool {
+        session.onFable && fableSpent(session.accountID) && session.looksStuck(now: Date().timeIntervalSince1970)
+    }
     @ObservationIgnored private var reportAt = Date.distantPast
     @ObservationIgnored private var limitMarkerDate: Date?
     var usage: [String: AccountUsage] = [:]
@@ -489,7 +494,7 @@ final class AccountStore {
             if state.installed { notify("Fable is spent on every account", "New claude commands use Opus for Fable until a Fable limit resets.") }
         }
     }
-    enum SessionAction: String { case opus, move }
+    enum SessionAction: String { case opus, move, focus }
     /// Types into the session's Ghostty tab: `/model opus`, or `/exit` and a resume on the current account.
     @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true) async -> Bool {
         guard !isDemo, !actingOn.contains(pid) else { return false }
@@ -525,6 +530,14 @@ final class AccountStore {
         guard !isDemo, let data = try? await bridgeOutput(["sessions"]),
               let value = try? JSONDecoder().decode([LiveSession].self, from: data) else { return }
         if value != sessions { sessions = value }
+        // Side A never answers that prompt (one choice buys usage credits); it tells you instead.
+        let stuck = value.filter { isStuckOnFable($0) }
+        for session in stuck where !stuckNotified.contains(session.pid) {
+            let account = config.accounts.first { $0.id == session.accountID }?.name ?? "Its account"
+            notify("\(session.name ?? "A Fable session") is stuck on Fable",
+                   "\(account) has no Fable left. In its Ghostty tab, choose Switch to … and continue, or press Esc and move it.")
+        }
+        stuckNotified = Set(stuck.map(\.pid))
     }
     func setLimitHook(_ enabled: Bool) async {
         struct State: Decodable { let installed: Bool }

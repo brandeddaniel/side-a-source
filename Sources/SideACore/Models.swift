@@ -97,12 +97,19 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     public var pid: Int
     public var name: String?
     public var status: String?
+    /// When the status last changed, in seconds since 1970.
+    public var statusSince: Double?
     public var model: String?
     public var accountID: String?
     public var id: Int { pid }
     public var onFable: Bool { model?.localizedCaseInsensitiveContains("fable") == true }
-    public init(pid: Int, name: String? = nil, status: String? = nil, model: String? = nil, accountID: String? = nil) {
-        self.pid = pid; self.name = name; self.status = status; self.model = model; self.accountID = accountID
+    public init(pid: Int, name: String? = nil, status: String? = nil, statusSince: Double? = nil, model: String? = nil, accountID: String? = nil) {
+        self.pid = pid; self.name = name; self.status = status; self.statusSince = statusSince; self.model = model; self.accountID = accountID
+    }
+    /// Waiting on the user, or "busy" far longer than a turn takes: on an account with no Fable
+    /// left, that is Claude Code's Fable-limit prompt or a turn stuck retrying the limit.
+    public func looksStuck(now: Double) -> Bool {
+        status == "waiting" || (status == "busy" && now - (statusSince ?? now) > 600)
     }
 }
 

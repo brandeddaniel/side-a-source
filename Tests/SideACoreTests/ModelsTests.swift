@@ -141,6 +141,14 @@ import Testing
     #expect(LiveSession(pid: 1, model: "claude-fable-5-1").onFable && !LiveSession(pid: 2, model: "claude-opus-5-5").onFable)
 }
 
+@Test func sessionLooksStuckWhenWaitingOrBusyFarTooLong() {
+    let now = 1_000_000.0
+    #expect(LiveSession(pid: 1, status: "waiting", statusSince: now - 5).looksStuck(now: now))
+    #expect(LiveSession(pid: 2, status: "busy", statusSince: now - 3600).looksStuck(now: now))
+    #expect(!LiveSession(pid: 3, status: "busy", statusSince: now - 120).looksStuck(now: now))
+    #expect(!LiveSession(pid: 4, status: "idle", statusSince: now - 9000).looksStuck(now: now))
+}
+
 @Test func scheduleIgnoresLightOvernightAgentTraffic() {
     // A real 14-day histogram: overnight agents run at up to 13% of the peak.
     let hours = [1095, 1542, 1584, 1586, 2286, 457, 289, 287, 16888, 20207, 18177, 15070, 14568, 18778,
