@@ -22,7 +22,6 @@ final class AccountStore {
     var config = Configuration()
     var dependencies = DependencyReport()
     var checkingDependencies = false
-    let analytics: AppAnalytics
     var error: String?
     /// Accounts that own the Mac-wide Claude and Codex logins, when they are in the library.
     var activeIDs: [AgentProvider: String] = [:]
@@ -61,7 +60,6 @@ final class AccountStore {
 
     init() {
         isDemo = ProcessInfo.processInfo.arguments.contains("--demo")
-        analytics = AppAnalytics(allowed: !isDemo)
         root = isDemo
             ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("SideA-preview-\(ProcessInfo.processInfo.processIdentifier)")
             : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/SideA")
@@ -134,7 +132,6 @@ final class AccountStore {
                 self?.lidOpen = false
             }
         }
-        analytics.capture(.launched)
         pollTask = Task { [weak self] in
             // Every bridge call needs Python, so nothing runs until the tool scan has found it.
             await self?.refreshDependencies()
@@ -286,12 +283,9 @@ final class AccountStore {
                 config.accounts[index].ready = false; persist()
                 throw BridgeFailure(message: "That account is already in your library. Sign in with a different email in the browser.")
             }
-            let wasReady = config.accounts[index].ready
             config.accounts[index].email = status.email
             config.accounts[index].ready = true
-            let saved = persist()
-            if saved && !wasReady { analytics.capture(.accountConnected, provider: config.accounts[index].provider) }
-            return saved
+            return persist()
         } catch {
             // A timeout or unavailable CLI does not prove a previously verified login expired.
             if reportError { self.error = error.localizedDescription }
@@ -331,7 +325,6 @@ final class AccountStore {
             _ = try await bridgeOutput(["activate", id])
             selectionGeneration += 1
             activeIDs[account.provider] = id
-            analytics.capture(.handoffReady, provider: account.provider)
         } catch { self.error = error.localizedDescription }
     }
     /// Keeps the Mac's existing login as a library account so switching never loses it.

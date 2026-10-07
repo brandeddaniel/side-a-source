@@ -3,11 +3,9 @@ import SwiftUI
 @main
 struct SideAApp: App {
     @State private var store: AccountStore
-    @StateObject private var updates: Updates
     init() {
         let store = AccountStore()
         _store = State(initialValue: store)
-        _updates = StateObject(wrappedValue: Updates())
         DispatchQueue.main.async { store.setMenuBarOnly(store.config.menuBarOnly) }
     }
     var body: some Scene {
@@ -19,7 +17,6 @@ struct SideAApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .commands {
-            CommandGroup(after: .appInfo) { UpdateButton(updates: updates) }
             CommandGroup(after: .help) { Button("Save diagnostics…") { store.saveDiagnostics() } }
             CommandMenu("Player") {
                 Button("Use selected account on this Mac") { store.play() }.keyboardShortcut(.return, modifiers: .command)
@@ -31,7 +28,7 @@ struct SideAApp: App {
             }
         }
         MenuBarExtra {
-            MenuPlayer(store: store, updates: updates)
+            MenuPlayer(store: store)
         } label: {
             // The menu bar is the main surface: a gauge and the active account's tightest limit.
             if let percent = menuPercent {
@@ -41,7 +38,7 @@ struct SideAApp: App {
             }
         }
         .menuBarExtraStyle(.window)
-        Settings { SettingsView(store: store, updates: updates) }
+        Settings { SettingsView(store: store) }
     }
     /// The active Claude account's tightest limit: 5-hour or weekly, whichever is closer.
     private var menuPercent: Int? {

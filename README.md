@@ -28,11 +28,22 @@ SceneKit, and an original Blender model.
 - Codex accounts show their limits through the Codex app-server
   `account/rateLimits/read` call and can be primed. Switching is Claude-only.
 
-## Updates and privacy
+## Updates and privacy (local fork)
 
-Side A checks for signed, notarized updates and waits for your coding session to close before relaunching for an update. Disable background checks in Settings. Versions before 0.4 need one manual download to gain the updater. See [signed updates](docs/updates.md).
+This fork has **no auto-updater and no analytics**. Sparkle and PostHog are removed, so the app
+never contacts getsidea.com, an appcast, or any telemetry service. The only network calls are the ones
+the app needs to work: Anthropic's OAuth usage/profile endpoints (to read Claude limits) and the
+local `claude`/`codex` CLIs, which talk to their own providers.
 
-Anonymous app statistics are **off by default**. Opt in during setup or in Settings to send coarse setup and handoff events. No account details, code, project paths, recordings, or persistent identifiers are collected. See [analytics](docs/analytics.md).
+To pull upstream changes when you choose:
+
+```sh
+git fetch upstream
+git merge upstream/main   # resolve conflicts in Package.swift, Info.plist, Settings/Menu views if any
+./scripts/build-app.sh
+```
+
+Before merging, check that no new updater, analytics, or remote endpoint came in: `git diff HEAD upstream/main -- Package.swift scripts/Info.plist Sources bridge | grep -iE 'http|sparkle|posthog|URLSession'`.
 
 A local diagnostic summary is available from Settings or Help. It contains only app/tool versions and coarse session state; nothing is uploaded. See [recovery](docs/recovery.md).
 
@@ -100,7 +111,7 @@ swift test
 ```
 
 The build script copies the canonical bridge into app resources before compiling.
-Do not edit the generated resource copy. Sparkle 2.9.6 is pinned for signed automatic updates; the bridge needs no third-party Python packages. CI runs both suites and builds verified app artifacts on native
+Do not edit the generated resource copy. There are no package dependencies; the bridge needs no third-party Python packages. CI runs both suites and builds verified app artifacts on native
 Apple Silicon and Intel Macs. The [distribution guide](docs/distribution.md)
 describes the gated signing, notarization, and public-release pipeline.
 The `site/` directory contains the minimal Three.js download page. Public releases

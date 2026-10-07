@@ -8,7 +8,6 @@ struct MenuPlayer: View {
         Date.ISO8601FormatStyle(timeZone: .current).year().month().day().format(Calendar.current.date(byAdding: .day, value: offset, to: Date())!)
     }
     @Bindable var store: AccountStore
-    @ObservedObject var updates: Updates
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @AppStorage("tourSeen") private var tourSeen = false
@@ -70,11 +69,6 @@ struct MenuPlayer: View {
             if let error = store.error {
                 Text(error).font(.system(size: 11)).foregroundStyle(.red).lineLimit(4)
                     .onTapGesture { store.error = nil }
-            }
-            if let version = updates.available {
-                Button { updates.install() } label: {
-                    Label("Update to \(version)", systemImage: "arrow.down.circle.fill").font(.system(size: 11, weight: .medium))
-                }.buttonStyle(.borderless).help("Restart Side A with the new version")
             }
             Divider()
             Toggle(isOn: Binding(get: { store.config.smartMode }, set: { _ in store.toggleSmart() })) {

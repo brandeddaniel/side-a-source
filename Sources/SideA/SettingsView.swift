@@ -8,7 +8,6 @@ enum SettingsTab: String { case accounts, usage, autopilot, general }
 /// The one place to manage accounts and preferences; the menu bar and player link here.
 struct SettingsView: View {
     @Bindable var store: AccountStore
-    @ObservedObject var updates: Updates
     var body: some View {
         TabView(selection: $store.settingsTab) {
             AccountsSettings(store: store)
@@ -17,7 +16,7 @@ struct SettingsView: View {
                 .tabItem { Label("Usage", systemImage: "chart.bar") }.tag(SettingsTab.usage)
             AutopilotSettings(store: store)
                 .tabItem { Label("Autopilot", systemImage: "arrow.triangle.2.circlepath") }.tag(SettingsTab.autopilot)
-            GeneralSettings(store: store, updates: updates)
+            GeneralSettings(store: store)
                 .tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
         }
         .frame(width: 520, height: 560)
@@ -219,7 +218,6 @@ struct AutopilotSettings: View {
 
 struct GeneralSettings: View {
     @Bindable var store: AccountStore
-    @ObservedObject var updates: Updates
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage("tourSeen") private var tourSeen = false
     var body: some View {
@@ -233,17 +231,11 @@ struct GeneralSettings: View {
                 DependencyStatusView(store: store, provider: .claude)
                 DependencyStatusView(store: store, provider: .codex, compact: true)
             }
-            Section("Updates") {
-                Toggle("Automatically check for updates", isOn: $updates.automaticallyChecks)
-                Toggle("Install updates automatically", isOn: $updates.automaticallyInstalls)
-                    .disabled(!updates.automaticallyChecks)
-                LabeledContent { UpdateButton(updates: updates) } label: { Text("Signed, notarized updates") }
-            }
             Section("Privacy") {
-                UsagePreference(analytics: store.analytics)
+                LabeledContent("Local build", value: "No updates or analytics")
                 LabeledContent {
                     Button("Save diagnostics…") { store.saveDiagnostics() }
-                } label: { Link("Privacy details", destination: URL(string: "https://getsidea.com/index.md")!) }
+                } label: { Text("Diagnostics stay on this Mac") }
             }
         }.formStyle(.grouped)
     }

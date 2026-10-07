@@ -24,23 +24,5 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Arne Noori. MIT License.</string>
-	<key>SUAllowsAutomaticUpdates</key>
-	<true/>
-	<key>SUAutomaticallyUpdate</key>
-	<true/>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://getsidea.com/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>dimAjJmkTwAD/fUh9szFrWkDPUcU2k+/LAuDUh91GIA=</string>
-	<key>SURequireSignedFeed</key>
-	<true/>
-	<key>SUSendProfileInfo</key>
-	<false/>
-	<key>SUVerifyUpdateBeforeExtraction</key>
-	<true/>
-	<key>SideAPostHogToken</key>
-	<string>phc_CFUnCbSRwdjiYHdnPd7sV4DFpaKPBFuFifGEGjR9pALg</string>
 </dict>
 </plist>

@@ -39,15 +39,3 @@ struct DependencyStatusView: View {
         }.font(.system(size: 12))
     }
 }
-
-struct UsagePreference: View {
-    @Bindable var analytics: AppAnalytics
-    var body: some View {
-        Toggle(isOn: Binding(get: { analytics.enabled }, set: { analytics.setEnabled($0) })) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Share anonymous usage")
-                Text("Counts only. No accounts or code.").font(.caption).foregroundStyle(.secondary)
-            }
-        }.toggleStyle(.checkbox)
-    }
-}

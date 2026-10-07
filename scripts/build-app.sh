@@ -21,10 +21,5 @@ cp "$bin_dir/SideA" "$app_path/Contents/MacOS/SideA"
 cp -R "$bin_dir/SideA_SideA.bundle" "$app_path/Contents/Resources/SideA_SideA.bundle"
 cp scripts/Info.plist "$app_path/Contents/Info.plist"
 if [[ -f design/SideA.icns ]]; then cp design/SideA.icns "$app_path/Contents/Resources/SideA.icns"; fi
-framework_source=".build/package-$architecture/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
-test -d "$framework_source"
-mkdir -p "$app_path/Contents/Frameworks"
-ditto "$framework_source" "$app_path/Contents/Frameworks/Sparkle.framework"
-./scripts/sign-framework.sh "$app_path/Contents/Frameworks/Sparkle.framework" --force --sign -
 codesign --force --sign - "$app_path"
 echo "$app_path"
