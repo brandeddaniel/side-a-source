@@ -41,6 +41,7 @@ struct MenuPlayer: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(maxHeight: 440)
             .fixedSize(horizontal: false, vertical: true)
+            FableSessions(store: store)
             if !store.shellSwitching && !store.isDemo && store.config.accounts.contains(where: { $0.provider == .claude }) {
                 HStack {
                     Text("Switching is off in Terminal").font(.system(size: 11))
@@ -49,7 +50,7 @@ struct MenuPlayer: View {
                 }
             }
             if store.unknownLogins[.claude] == nil, let next = Planner.nextAvailable(store.config.accounts.filter { $0.provider == .claude }, usage: store.usage, now: Date().timeIntervalSince1970),
-               Planner.best(store.config.accounts.filter { $0.provider == .claude }, usage: store.usage, active: nil, now: Date().timeIntervalSince1970) == nil {
+               Planner.best(store.config.accounts.filter { $0.provider == .claude }, usage: store.usage, active: nil, now: Date().timeIntervalSince1970, ignoringModelLimits: true) == nil {
                 Text("All limited. \(next.0.name) is back \(UsageBar.format(next.1)).")
                     .font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
@@ -182,6 +183,49 @@ struct AccountUsageRow: View {
             return "Back \(UsageBar.format(blocked))"
         }
         return nil
+    }
+}
+
+/// Running sessions on Fable, and whether their account still has Fable left. A running
+/// session keeps its account and model; `claude -c` restarts it on Side A's current choice.
+struct FableSessions: View {
+    @Bindable var store: AccountStore
+    var body: some View {
+        let sessions = store.sessions.filter(\.onFable)
+        let now = Date().timeIntervalSince1970
+        if store.fableToOpus {
+            Label("Fable is spent on every account. New commands use Opus.", systemImage: "arrow.triangle.branch")
+                .font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+        }
+        if !sessions.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Fable sessions (\(sessions.count))").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                ForEach(sessions) { session in
+                    let account = store.config.accounts.first { $0.id == session.accountID }
+                    let fable = session.accountID.flatMap { store.usage[$0]?.fable }
+                    let spent = fable.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
+                    HStack(spacing: 6) {
+                        Circle().fill(session.status == "busy" ? Color.green : Color.secondary.opacity(0.35)).frame(width: 6, height: 6)
+                            .help(session.status ?? "")
+                        Text(session.name ?? "pid \(session.pid)").lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        Text(account?.name ?? "Unknown account").foregroundStyle(.secondary).lineLimit(1)
+                        if spent {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                                .help("This account's Fable limit is spent. Exit the session and run claude -c to continue on the account Side A picks now.")
+                        } else if let fable {
+                            Text("fb \(Int(fable.percent.rounded()))%").foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }.font(.system(size: 11))
+                }
+                if sessions.contains(where: { session in
+                    session.accountID.flatMap { store.usage[$0]?.fable }.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
+                }) {
+                    Text("Running sessions keep their account. Exit one and run claude -c to continue it on Side A's current pick.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 }
 

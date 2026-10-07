@@ -92,6 +92,20 @@ public struct AccountUsage: Codable, Equatable, Sendable {
     public var weeklyLimits: [UsageWindow] { windows.filter { $0.id == "seven_day" || $0.id.hasPrefix("seven_day_model:") } }
 }
 
+/// A running Claude Code session: the model of its latest reply and the account it runs on.
+public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
+    public var pid: Int
+    public var name: String?
+    public var status: String?
+    public var model: String?
+    public var accountID: String?
+    public var id: Int { pid }
+    public var onFable: Bool { model?.localizedCaseInsensitiveContains("fable") == true }
+    public init(pid: Int, name: String? = nil, status: String? = nil, model: String? = nil, accountID: String? = nil) {
+        self.pid = pid; self.name = name; self.status = status; self.model = model; self.accountID = accountID
+    }
+}
+
 public struct TokenRow: Codable, Equatable, Sendable {
     public var date: String?
     public var project: String?
@@ -175,13 +189,23 @@ public enum Planner {
         return window
     }
 
-    /// The fullest live weekly limit, overall or model-scoped.
-    static func tightestWeekly(_ usage: AccountUsage, _ now: Double) -> UsageWindow? {
-        usage.weeklyLimits.compactMap { live($0, now) }.max { $0.percent < $1.percent }
+    /// The fullest live weekly limit, overall or model-scoped (or overall only).
+    static func tightestWeekly(_ usage: AccountUsage, _ now: Double, ignoringModelLimits: Bool = false) -> UsageWindow? {
+        (ignoringModelLimits ? [usage.weekly].compactMap { $0 } : usage.weeklyLimits)
+            .compactMap { live($0, now) }.max { $0.percent < $1.percent }
     }
 
-    public static func hasHeadroom(_ usage: AccountUsage, now: Double) -> Bool {
-        (live(usage.fiveHour, now)?.percent ?? 0) < full && (tightestWeekly(usage, now)?.percent ?? 0) < full
+    public static func hasHeadroom(_ usage: AccountUsage, now: Double, ignoringModelLimits: Bool = false) -> Bool {
+        (live(usage.fiveHour, now)?.percent ?? 0) < full
+            && (tightestWeekly(usage, now, ignoringModelLimits: ignoringModelLimits)?.percent ?? 0) < full
+    }
+
+    /// Fable first: an account with Fable room left. Only when every Fable limit is spent does it
+    /// pick by the overall limits, and `fableSpent` tells the caller to send Fable to Opus.
+    public static func pick(_ candidates: [Account], usage: [String: AccountUsage], active: String?, now: Double) -> (id: String?, fableSpent: Bool) {
+        if let id = best(candidates, usage: usage, active: active, now: now) { return (id, false) }
+        let id = best(candidates, usage: usage, active: active, now: now, ignoringModelLimits: true)
+        return (id, id != nil)
     }
 
     /// Weekly quota (in Pro-plan percent) that must be used per hour to avoid losing it at reset.
@@ -212,11 +236,12 @@ public enum Planner {
         return (full - last.1) / perMinute
     }
 
-    public static func best(_ candidates: [Account], usage: [String: AccountUsage], active: String?, now: Double) -> String? {
+    public static func best(_ candidates: [Account], usage: [String: AccountUsage], active: String?, now: Double,
+                            ignoringModelLimits: Bool = false) -> String? {
         let eligible = candidates.filter { account in
             guard account.ready, account.allowAuto, let value = usage[account.id], !value.stale else { return false }
             // Only move to an account with real room; the active one may run up to the limit.
-            return hasHeadroom(value, now: now) && (account.id == active || (live(value.fiveHour, now)?.percent ?? 0) < switchTarget)
+            return hasHeadroom(value, now: now, ignoringModelLimits: ignoringModelLimits) && (account.id == active || (live(value.fiveHour, now)?.percent ?? 0) < switchTarget)
         }
         guard let top = eligible.map({ urgency(usage[$0.id]!, now: now) }).max() else { return nil }
         let pick = eligible.filter { urgency(usage[$0.id]!, now: now) >= top * 0.75 }

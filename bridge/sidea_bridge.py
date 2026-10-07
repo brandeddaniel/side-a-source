@@ -17,6 +17,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -381,12 +382,36 @@ SHELL_MARK = "# side-a shell integration"
 
 def shell_snippet(root):
     selector = shlex.quote(str(root / "runtime" / "claude-selector"))
+    fable = shlex.quote(str(fable_model_path(root)))
     # A preexec hook, not a `claude` function: an alias to a path (claude=~/.claude/local/claude)
     # would skip a function, but every command runs after preexec. One line, so removal stays simple.
+    # The fable alias is remapped only while Side A asks for it, and only unset if Side A set it.
     return (f"{SHELL_MARK}\n"
-            f"_side_a_select() {{ local d; d=\"$(cat {selector} 2>/dev/null)\"; "
-            f"[ -f {selector} ] && export CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$d\" || unset CLAUDE_SECURESTORAGE_CONFIG_DIR; }}; "
+            f"_side_a_select() {{ local d m; d=\"$(cat {selector} 2>/dev/null)\"; "
+            f"[ -f {selector} ] && export CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$d\" || unset CLAUDE_SECURESTORAGE_CONFIG_DIR; "
+            f"m=\"$(cat {fable} 2>/dev/null)\"; "
+            f"if [ -n \"$m\" ]; then export ANTHROPIC_DEFAULT_FABLE_MODEL=\"$m\" _SIDE_A_FABLE=1; "
+            f"elif [ -n \"$_SIDE_A_FABLE\" ]; then unset ANTHROPIC_DEFAULT_FABLE_MODEL _SIDE_A_FABLE; fi; }}; "
             f"autoload -Uz add-zsh-hook && add-zsh-hook preexec _side_a_select\n")
+
+
+# While every account's Fable limit is spent, new `claude` commands resolve the fable alias to this.
+FABLE_FALLBACK_MODEL = "claude-opus-5-5"
+
+
+def fable_model_path(root):
+    return root / "runtime" / "claude-fable-model"
+
+
+def set_fable_fallback(root, enabled):
+    path = fable_model_path(root)
+    if not enabled:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(FABLE_FALLBACK_MODEL)
+    os.replace(temp, path)
 
 
 def set_shell(root, enabled):
@@ -561,6 +586,10 @@ def set_limit_hook(root, enabled):
         hooks.pop("StopFailure", None)
     if not hooks:
         settings.pop("hooks")
+    write_settings(path, settings)
+
+
+def write_settings(path, settings):
     path.parent.mkdir(parents=True, exist_ok=True)
     path = path.resolve()  # a symlinked settings file stays a symlink
     with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, prefix=".side-a-") as stream:
@@ -569,6 +598,79 @@ def set_limit_hook(root, enabled):
     if path.exists():
         os.chmod(stream.name, path.stat().st_mode & 0o777)
     os.replace(stream.name, path)
+
+
+OPUS_FALLBACK = ["opus"]
+
+
+def set_opus_fallback(enabled):
+    """Opt-in `fallbackModel` in ~/.claude/settings.json; only removes the value Side A wrote."""
+    path = Path.home() / ".claude" / "settings.json"
+    settings = read_json(path, {}) or {}
+    if enabled:
+        if settings.get("fallbackModel"):
+            return
+        settings["fallbackModel"] = OPUS_FALLBACK
+    elif settings.get("fallbackModel") == OPUS_FALLBACK:
+        settings.pop("fallbackModel")
+    else:
+        return
+    write_settings(path, settings)
+
+
+def opus_fallback_installed():
+    settings = read_json(Path.home() / ".claude" / "settings.json", {}) or {}
+    return bool(settings.get("fallbackModel"))
+
+
+PROFILE_IN_ENV = re.compile(r"CLAUDE_SECURESTORAGE_CONFIG_DIR=(\S.*?/profiles/([0-9a-f-]{36}))")
+
+
+def session_model(session_id):
+    """The model of the session's latest reply, from the tail of its transcript."""
+    for path in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 262144))
+            lines = stream.read().splitlines()
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            model = (entry.get("message") or {}).get("model") if entry.get("type") == "assistant" else None
+            if model and not model.startswith("<"):
+                return model
+    return None
+
+
+def live_sessions(root, config):
+    """Running Claude Code sessions, the model each last replied with, and the account it runs on:
+    the profile in its environment, or the Mac login when it has none."""
+    ids = {account["id"] for account in config.get("accounts", [])}
+    mac = None
+    sessions = []
+    for path in (Path.home() / ".claude" / "sessions").glob("*.json"):
+        data = read_json(path, None)
+        pid = data.get("pid") if isinstance(data, dict) else None
+        if not isinstance(pid, int) or not isinstance(data.get("sessionId"), str) or data.get("cwd") == str(root):
+            continue
+        result = subprocess.run(["ps", "-E", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+        if result.returncode != 0:
+            continue  # not running any more
+        match = PROFILE_IN_ENV.search(result.stdout)
+        if match:
+            account = match.group(2) if match.group(2) in ids else None
+        else:
+            if mac is None:
+                try:
+                    mac = (account_for_email(config, mac_email(root)) or {}).get("id") or ""
+                except (ValueError, OSError):
+                    mac = ""
+            account = mac or None
+        sessions.append({"pid": pid, "name": data.get("name"), "status": data.get("status"),
+                         "model": session_model(data["sessionId"]), "accountID": account})
+    return sorted(sessions, key=lambda item: item["pid"])
 
 
 def limit_hook_installed():
@@ -591,6 +693,9 @@ def main():
     commands.add_parser("report")
     commands.add_parser("hook").add_argument("state", choices=["on", "off", "status"])
     commands.add_parser("shell").add_argument("state", choices=["on", "off", "status"])
+    commands.add_parser("fable").add_argument("state", choices=["on", "off", "status"])
+    commands.add_parser("fallback").add_argument("state", choices=["on", "off", "status"])
+    commands.add_parser("sessions")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     os.umask(0o077)
@@ -607,7 +712,20 @@ def main():
             set_shell(root, args.state == "on")
         print(json.dumps({"installed": shell_installed(root)}))
         return
+    if args.command == "fable":
+        if args.state != "status":
+            set_fable_fallback(root, args.state == "on")
+        print(json.dumps({"installed": fable_model_path(root).exists()}))
+        return
+    if args.command == "fallback":
+        if args.state != "status":
+            set_opus_fallback(args.state == "on")
+        print(json.dumps({"installed": opus_fallback_installed()}))
+        return
     config = read_json(root / "config.json")
+    if args.command == "sessions":
+        print(json.dumps(live_sessions(root, config)))
+        return
     if args.command == "active":
         import codex_bridge
         mac = mac_email(root)

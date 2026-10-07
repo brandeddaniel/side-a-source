@@ -121,6 +121,26 @@ import Testing
     #expect(Planner.nextAvailable([a], usage: [a.id: fableFull], now: now)?.1 == now + 86_400)
 }
 
+@Test func plannerPrefersFableRoomAndOnlyThenFallsBackToOpus() {
+    let now = 1_000_000.0
+    let window = { (id: String, percent: Double) in UsageWindow(id: id, label: id, percent: percent, resetsAt: now + 86_400) }
+    let spent = { (weekly: Double) in AccountUsage(windows: [window("five_hour", 10), window("seven_day", weekly), window("seven_day_model:fable", 100)]) }
+    let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
+    let c = Account(name: "C", ready: true, allowAuto: true)
+    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 90), window("seven_day_model:fable", 20)])
+    // C has the least overall quota at risk, but it is the only one with Fable left.
+    let first = Planner.pick([a, b, c], usage: [a.id: spent(10), b.id: spent(20), c.id: roomy], active: a.id, now: now)
+    #expect(first.id == c.id && !first.fableSpent)
+    // Fable spent everywhere: pick by overall limits (keeping a usable active account) and send Fable to Opus.
+    let fallback = Planner.pick([a, b], usage: [a.id: spent(10), b.id: spent(20)], active: b.id, now: now)
+    #expect(fallback.id == b.id && fallback.fableSpent)
+    #expect(Planner.pick([a, b], usage: [a.id: spent(10), b.id: spent(20)], active: nil, now: now).id == a.id)
+    // Everything spent: no pick and no Opus remap.
+    let none = Planner.pick([a], usage: [a.id: spent(99)], active: a.id, now: now)
+    #expect(none.id == nil && !none.fableSpent)
+    #expect(LiveSession(pid: 1, model: "claude-fable-5-1").onFable && !LiveSession(pid: 2, model: "claude-opus-5-5").onFable)
+}
+
 @Test func scheduleIgnoresLightOvernightAgentTraffic() {
     // A real 14-day histogram: overnight agents run at up to 13% of the peak.
     let hours = [1095, 1542, 1584, 1586, 2286, 457, 289, 287, 16888, 20207, 18177, 15070, 14568, 18778,

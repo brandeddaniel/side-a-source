@@ -202,6 +202,10 @@ struct AutopilotSettings: View {
                     Text("Switch instantly on a limit")
                     Text("Adds a silent Claude Code hook.")
                 }
+                Toggle(isOn: Binding(get: { store.opusFallback }, set: { value in Task { await store.setOpusFallback(value) } })) {
+                    Text("Fall back to Opus when a model is unavailable")
+                    Text("Sets fallbackModel in Claude Code settings. Claude Code decides when it applies.")
+                }
             }
             Section("Schedule") {
                 if let schedule = store.schedule {
@@ -213,6 +217,7 @@ struct AutopilotSettings: View {
             }
             Section("How it decides") {
                 LabeledContent("Picks", value: "Quota closest to expiring, by plan size")
+                LabeledContent("Fable", value: store.fableToOpus ? "Spent everywhere: new commands use Opus" : "Accounts with Fable left come first")
                 LabeledContent("Switches at", value: "\(Int(Planner.full))%")
                 LabeledContent("Warm-up", value: "One tiny Haiku message")
             }

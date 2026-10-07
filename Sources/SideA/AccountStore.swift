@@ -31,6 +31,11 @@ final class AccountStore {
     var limitHook = false
     /// The `claude` shell function that makes new commands use the chosen account.
     var shellSwitching = false
+    /// Every account's Fable limit is spent, so new commands resolve `fable` to Opus.
+    var fableToOpus = false
+    /// Opt-in `fallbackModel` in Claude Code's settings.
+    var opusFallback = false
+    var sessions: [LiveSession] = []
     @ObservationIgnored private var reportAt = Date.distantPast
     @ObservationIgnored private var limitMarkerDate: Date?
     var usage: [String: AccountUsage] = [:]
@@ -154,6 +159,8 @@ final class AccountStore {
         async let shell = try? bridgeOutput(["shell", "status"])
         if let data = await hook { limitHook = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
         if let data = await shell { shellSwitching = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
+        if let data = try? await bridgeOutput(["fable", "status"]) { fableToOpus = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
+        if let data = try? await bridgeOutput(["fallback", "status"]) { opusFallback = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
     }
     /// Reads accounts side by side; each Codex read starts its own app-server, so serial reads add up.
     private func refresh(_ ids: [String]) async {
@@ -379,6 +386,7 @@ final class AccountStore {
     func refreshAll(force: Bool = false) async {
         await refreshActive()
         Task { await refreshReport() }
+        Task { await refreshSessions() }
         await refresh(config.accounts.filter { $0.ready
             && (dueForRead($0) || (force && Date().timeIntervalSince(usageAt[$0.id] ?? .distantPast) > 60)) }.map(\.id))
     }
@@ -451,6 +459,27 @@ final class AccountStore {
             shellSwitching = try JSONDecoder().decode(State.self, from: data).installed
         } catch { self.error = error.localizedDescription }
     }
+    func setOpusFallback(_ enabled: Bool) async {
+        struct State: Decodable { let installed: Bool }
+        do {
+            let data = try await bridgeOutput(["fallback", enabled ? "on" : "off"])
+            opusFallback = try JSONDecoder().decode(State.self, from: data).installed
+        } catch { self.error = error.localizedDescription }
+    }
+    private func setFableToOpus(_ enabled: Bool) async {
+        guard enabled != fableToOpus else { return }
+        struct State: Decodable { let installed: Bool }
+        if let data = try? await bridgeOutput(["fable", enabled ? "on" : "off"]),
+           let state = try? JSONDecoder().decode(State.self, from: data) {
+            fableToOpus = state.installed
+            if state.installed { notify("Fable is spent on every account", "New claude commands use Opus for Fable until a Fable limit resets.") }
+        }
+    }
+    func refreshSessions() async {
+        guard !isDemo, let data = try? await bridgeOutput(["sessions"]),
+              let value = try? JSONDecoder().decode([LiveSession].self, from: data) else { return }
+        if value != sessions { sessions = value }
+    }
     func setLimitHook(_ enabled: Bool) async {
         struct State: Decodable { let installed: Bool }
         do {
@@ -476,6 +505,7 @@ final class AccountStore {
         guard await refreshActive() else { return }
         await refresh(config.accounts.filter { $0.ready && dueForRead($0) }.map(\.id))
         Task { await refreshReport(maxAge: 3600) }
+        Task { await refreshSessions() }
         guard config.smartMode else { return }
         let now = Date().timeIntervalSince1970
         // Codex: the desktop app keeps its own copy of the login, and OpenAI revokes a login
@@ -487,14 +517,16 @@ final class AccountStore {
             if let current, failing.contains(current), usage[current]?.stale != true { continue }
             // An account with Autopilot off is never switched away from automatically.
             if let current, config.accounts.first(where: { $0.id == current })?.allowAuto == false { continue }
-            if let best = Planner.best(accounts, usage: plannable, active: current, now: now), best != current {
+            let pick = Planner.pick(accounts, usage: plannable, active: current, now: now)
+            await setFableToOpus(pick.fableSpent)
+            if let best = pick.id, best != current {
                 let from = config.accounts.first { $0.id == current }?.name
                 await activate(best)
                 if activeIDs[provider] == best, let name = config.accounts.first(where: { $0.id == best })?.name {
                     notify("Switched to \(name)", from.map { "\($0) is near its limit or has less quota at risk." } ?? "Autopilot picked the account with the most quota at risk.")
                 }
             }
-            if provider == .claude, let next = Planner.nextAvailable(accounts, usage: plannable, now: now), Planner.best(accounts, usage: plannable, active: nil, now: now) == nil {
+            if provider == .claude, let next = Planner.nextAvailable(accounts, usage: plannable, now: now), Planner.best(accounts, usage: plannable, active: nil, now: now, ignoringModelLimits: true) == nil {
                 if !exhaustedNotified {
                     exhaustedNotified = true
                     notify("All Claude accounts are limited", "\(next.0.name) is back \(UsageBar.format(next.1)).")

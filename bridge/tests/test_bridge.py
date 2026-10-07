@@ -193,6 +193,48 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue(bridge.limit_marker(self.root).exists())
             bridge.set_limit_hook(self.root,False)
             self.assertEqual(bridge.read_json(home/'.claude/settings.json'),{'model':'opus','hooks':{'StopFailure':[mine]}})
+    def test_fable_maps_to_opus_only_while_side_a_asks_and_keeps_the_users_own_value(self):
+        fake=self.root/'bin'; fake.mkdir(); (fake/'claude').write_text('#!/bin/sh\necho "${ANTHROPIC_DEFAULT_FABLE_MODEL-unset}"\n'); (fake/'claude').chmod(0o755)
+        line=bridge.shell_snippet(self.root).splitlines()[1]
+        run=lambda before='': subprocess.run(['zsh','-fc',f"PATH={fake}:$PATH; {before} {line}; _side_a_select; claude"],
+                                             capture_output=True,text=True).stdout.strip()
+        self.assertEqual(run(),'unset')
+        bridge.set_fable_fallback(self.root,True)
+        self.assertEqual(run(),bridge.FABLE_FALLBACK_MODEL)
+        # Turned off again: a shell that had the remap drops it, but a value the user exported stays.
+        bridge.set_fable_fallback(self.root,False)
+        self.assertEqual(run('export ANTHROPIC_DEFAULT_FABLE_MODEL=mine;'),'mine')
+        self.assertEqual(subprocess.run(['zsh','-fc',f"PATH={fake}:$PATH; {line}; _side_a_select; rm {bridge.fable_model_path(self.root)}; _side_a_select; claude"],
+                                        capture_output=True,text=True).stdout.strip(),'unset')
+    def test_opus_fallback_never_overwrites_or_removes_the_users_own_value(self):
+        home=self.root/'home'; (home/'.claude').mkdir(parents=True)
+        settings=home/'.claude/settings.json'
+        bridge.atomic_json(settings,{'model':'opus'})
+        with patch.object(Path,'home',return_value=home):
+            bridge.set_opus_fallback(True)
+            self.assertEqual(bridge.read_json(settings),{'model':'opus','fallbackModel':['opus']})
+            bridge.set_opus_fallback(False)
+            self.assertEqual(bridge.read_json(settings),{'model':'opus'})
+            bridge.atomic_json(settings,{'fallbackModel':['sonnet']})
+            bridge.set_opus_fallback(True); bridge.set_opus_fallback(False)
+            self.assertEqual(bridge.read_json(settings),{'fallbackModel':['sonnet']})
+            self.assertTrue(bridge.opus_fallback_installed())
+    def test_sessions_report_model_and_account_from_profile_environment(self):
+        home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
+        project=home/'.claude/projects/-x'; project.mkdir(parents=True)
+        a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}
+        for pid,sid in ((101,'s1'),(102,'s2'),(103,'s3')):
+            bridge.atomic_json(sessions/f'{pid}.json',{'pid':pid,'sessionId':sid,'cwd':'/w','name':f'n{pid}','status':'busy'})
+        (project/'s1.jsonl').write_text(json.dumps({'type':'assistant','message':{'model':'claude-fable-5-1'}})+'\n'
+                                        +json.dumps({'type':'assistant','message':{'model':'<synthetic>'}})+'\n')
+        envs={101:f"claude CLAUDE_SECURESTORAGE_CONFIG_DIR={self.root}/my dir/profiles/{b['id']} TERM=x",102:'claude TERM=x'}
+        def ps(command,**_):
+            pid=int(command[-1]); return subprocess.CompletedProcess(command,0 if pid in envs else 1,envs.get(pid,''),'')
+        with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
+             patch.object(bridge,'mac_email',return_value='a@x'):
+            result=bridge.live_sessions(self.root,{'accounts':[a,b]})
+        self.assertEqual(result,[{'pid':101,'name':'n101','status':'busy','model':'claude-fable-5-1','accountID':b['id']},
+                                 {'pid':102,'name':'n102','status':'busy','model':None,'accountID':a['id']}])
     def test_report_counts_each_response_once_per_day_and_project(self):
         folder=Path(self.temp.name)/'home/.claude/projects/p'; folder.mkdir(parents=True)
         line=lambda mid,ts,out:json.dumps({'timestamp':ts,'cwd':'/work/app','requestId':'r'+mid,'message':{'id':mid,'model':'m','usage':{'input_tokens':1,'output_tokens':out}}})
