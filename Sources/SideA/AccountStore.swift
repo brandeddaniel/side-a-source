@@ -47,6 +47,8 @@ final class AccountStore {
     @ObservationIgnored private var switchedToOpus: Set<Int> = []
     /// Limit hits already reported because Side A could not move the session itself.
     @ObservationIgnored private var limitReported: [Int: Double] = [:]
+    /// Sessions already told they should move but can't be moved automatically (background work).
+    @ObservationIgnored private var moveSuggested: [Int: String] = [:]
     /// Fable sessions already reported as stuck, until they move on.
     @ObservationIgnored private var stuckNotified: Set<Int> = []
     @ObservationIgnored private var reportAt = Date.distantPast
@@ -627,6 +629,17 @@ final class AccountStore {
     private func fixSessions(fableSpentEverywhere: Bool) async {
         guard fixFableSessions else { return }
         let now = Date().timeIntervalSince1970
+        // Turn over but still "busy" (background tasks): /exit would kill that work, so say it once instead.
+        for session in sessions where session.inTerminal && session.status == "busy" && session.turnEnded == true {
+            guard let id = session.accountID, moveSuggested[session.pid] != id, let value = trusted(id),
+                  Planner.shouldLeave(value, onFable: session.onFable, now: now),
+                  let target = roomyTarget(for: session, now: now) else { continue }
+            moveSuggested[session.pid] = id
+            let from = config.accounts.first { $0.id == id }?.name ?? "Its account"
+            let to = config.accounts.first { $0.id == target }?.name ?? "another account"
+            notify("Move \(session.name ?? "a session") to \(to)?",
+                   "\(from) is close to a limit, but the session has background work running, so Side A won't exit it. When that work is done, /exit and run claude -c in its tab.")
+        }
         for session in sessions where session.inTerminal && session.status == "idle" && session.limitHit == nil
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
