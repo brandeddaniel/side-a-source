@@ -584,18 +584,18 @@ final class AccountStore {
     }
     private func rescueStuck(now: Double) async {
         // A limit hit Side A won't act on (a shell command may be running, or there is no tab): say so once.
-        for session in sessions where session.limitHit != nil && (session.status == "shell" || !session.inTerminal) {
+        for session in sessions where session.limitHit != nil && (session.status == "shell" || !session.restartable) {
             guard let at = session.limitAt, now - at < 1800, (limitReported[session.pid] ?? 0) < at - 3600 || limitReported[session.pid] == nil
             else { continue }
             limitReported[session.pid] = at
             let account = config.accounts.first { $0.id == session.accountID }?.name ?? "its account"
             notify("\(session.name ?? "A session") hit its \(session.limitHit ?? "") limit",
                    session.inTerminal
-                       ? "It's on \(account) and has a shell command running, so Side A won't exit it. When the command is done, /exit and run claude -c in its tab to continue on an account with room."
+                       ? "It's on \(account) and has commands running that a restart would kill, so Side A won't exit it. Type /login in its tab and sign in to an account with room to switch without restarting."
                        : "It's a headless job on \(account); it can't be moved. It will stop until the limit resets.")
         }
         guard rescueStuckSessions else { return }
-        for session in sessions where session.inTerminal && (session.limitHit != nil || session.looksStuck(now: now))
+        for session in sessions where session.restartable && (session.limitHit != nil || session.looksStuck(now: now))
             && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.isExhausted(value, onFable: session.onFable, now: now) else { continue }
@@ -630,7 +630,7 @@ final class AccountStore {
         guard fixFableSessions else { return }
         let now = Date().timeIntervalSince1970
         // Turn over but still "busy" (background tasks): /exit would kill that work, so say it once instead.
-        for session in sessions where session.inTerminal && session.status == "busy" && session.turnEnded == true {
+        for session in sessions where session.inTerminal && ((session.status == "busy" && session.turnEnded == true) || (session.runningJobs ?? 0) > 0) {
             guard let id = session.accountID, moveSuggested[session.pid] != id, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now),
                   let target = roomyTarget(for: session, now: now) else { continue }
@@ -638,9 +638,11 @@ final class AccountStore {
             let from = config.accounts.first { $0.id == id }?.name ?? "Its account"
             let to = config.accounts.first { $0.id == target }?.name ?? "another account"
             notify("Move \(session.name ?? "a session") to \(to)?",
-                   "\(from) is close to a limit, but the session has background work running, so Side A won't exit it. When that work is done, /exit and run claude -c in its tab.")
+                   (session.runningJobs ?? 0) > 0
+                       ? "\(from) is close to a limit, and the session has commands running that a restart would kill. Type /login in its tab and sign in as \(to) to switch without restarting."
+                       : "\(from) is close to a limit, but the session has background work running, so Side A won't exit it. When that work is done, /exit and run claude -c in its tab.")
         }
-        for session in sessions where session.inTerminal && session.status == "idle" && session.limitHit == nil
+        for session in sessions where session.restartable && session.status == "idle" && session.limitHit == nil
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }

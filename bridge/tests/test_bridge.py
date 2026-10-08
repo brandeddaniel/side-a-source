@@ -232,12 +232,14 @@ class BridgeTests(unittest.TestCase):
                                         +json.dumps({'type':'assistant','message':{'model':'<synthetic>'}})+'\n')
         envs={101:f"claude CLAUDE_SECURESTORAGE_CONFIG_DIR={self.root}/my dir/profiles/{b['id']} TERM=x",102:'claude TERM=x'}
         def ps(command,**_):
+            if '-axo' in command:  # running_jobs: session 101 has a training run going
+                return subprocess.CompletedProcess(command,0,'500 101 /bin/zsh -c source /x/shell-snapshots/s.sh && train\n','')
             pid=int(command[-1]); return subprocess.CompletedProcess(command,0 if pid in envs else 1,envs.get(pid,''),'')
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
              patch.object(bridge,'mac_email',return_value='a@x'), patch.object(bridge,'read_secret',return_value=None):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
-        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
-                                 {'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
+        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'runningJobs':1,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
+                                 {'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'runningJobs':0,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
     def test_a_session_is_attributed_to_whoever_its_slot_login_belongs_to(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}

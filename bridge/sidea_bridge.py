@@ -759,6 +759,18 @@ def session_activity(session_id):
     return last, ended
 
 
+def running_jobs(pid):
+    """Shell commands the session started that are still running (Claude Code runs each through
+    `zsh -c source .../shell-snapshots/...`). Exiting or restarting the session would kill them."""
+    result = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True)
+    jobs = 0
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[1] == str(pid) and "shell-snapshots" in parts[2]:
+            jobs += 1
+    return jobs
+
+
 LIMIT_KINDS = (("fable", "fable limit"), ("weekly", "weekly limit"), ("session", "session limit"))
 
 
@@ -821,7 +833,8 @@ def live_sessions(root, config):
         since = data.get("statusUpdatedAt")
         limit, limit_at = session_limit(data["sessionId"])
         activity, ended = session_activity(data["sessionId"])
-        sessions.append({"limitHit": limit, "limitAt": limit_at, "lastActivity": activity, "turnEnded": ended,"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
+        sessions.append({"limitHit": limit, "limitAt": limit_at, "lastActivity": activity, "turnEnded": ended,
+                         "runningJobs": running_jobs(pid),"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
                          "statusSince": since / 1000 if isinstance(since, (int, float)) else None,
                          "model": session_model(data["sessionId"]), "accountID": account})
     return sorted(sessions, key=lambda item: item["pid"])
@@ -1082,6 +1095,8 @@ def session_action(root, pid, action, automatic=False):
         session = session_record(pid)
     elif session.get("status") not in ("idle", "shell"):
         raise ValueError("Wait for the session to finish its turn, then move it.")
+    if running_jobs(pid):
+        raise ValueError("It has commands still running (they would be killed by a restart). Use /login in its tab to switch its account without restarting.")
     model, effort = session_state(session["sessionId"])
     command = resume_command(pid, session["sessionId"], model, effort)
     selector = selection_path(root)

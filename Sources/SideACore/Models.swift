@@ -102,6 +102,10 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     /// The limit its latest reply says it hit ("fable", "session", "weekly"), and when.
     public var limitHit: String?
     public var limitAt: Double?
+    /// Commands it started that are still running; a restart would kill them.
+    public var runningJobs: Int?
+    /// Side A may exit and resume it: nothing it started is still running.
+    public var restartable: Bool { inTerminal && (runningJobs ?? 0) == 0 }
     /// When its transcript last changed, and whether its last entry ended a turn.
     public var lastActivity: Double?
     public var turnEnded: Bool?
