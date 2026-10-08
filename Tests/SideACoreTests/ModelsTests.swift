@@ -127,7 +127,7 @@ import Testing
     let spent = { (weekly: Double) in AccountUsage(windows: [window("five_hour", 10), window("seven_day", weekly), window("seven_day_model:fable", 100)]) }
     let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
     let c = Account(name: "C", ready: true, allowAuto: true)
-    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 90), window("seven_day_model:fable", 20)])
+    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 85), window("seven_day_model:fable", 20)])
     // C has the least overall quota at risk, but it is the only one with Fable left.
     let first = Planner.pick([a, b, c], usage: [a.id: spent(10), b.id: spent(20), c.id: roomy], active: a.id, now: now)
     #expect(first.id == c.id && !first.fableSpent)
@@ -147,6 +147,22 @@ import Testing
     #expect(LiveSession(pid: 2, status: "busy", statusSince: now - 3600).looksStuck(now: now))
     #expect(!LiveSession(pid: 3, status: "busy", statusSince: now - 120).looksStuck(now: now))
     #expect(!LiveSession(pid: 4, status: "idle", statusSince: now - 9000).looksStuck(now: now))
+}
+
+@Test func sessionsLeaveAt90PercentAndPicksNeedRoomBelowIt() {
+    let now = 1_000_000.0
+    let w = { (id: String, percent: Double) in UsageWindow(id: id, label: id, percent: percent, resetsAt: now + 86_400) }
+    let fableNear = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 40), w("seven_day_model:fable", 92)])
+    #expect(Planner.shouldLeave(fableNear, onFable: true, now: now))
+    #expect(!Planner.shouldLeave(fableNear, onFable: false, now: now))
+    #expect(!Planner.isSpent(fableNear, onFable: true, now: now))
+    let weeklySpent = AccountUsage(windows: [w("five_hour", 60), w("seven_day", 100), w("seven_day_model:fable", 28)])
+    #expect(Planner.isSpent(weeklySpent, onFable: true, now: now) && Planner.isSpent(weeklySpent, onFable: false, now: now))
+    // A nearly spent account is never a new pick, though the active one may run on up to the limit.
+    let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
+    let roomy = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 95), w("seven_day_model:fable", 20)])
+    #expect(Planner.best([a, b], usage: [a.id: fableNear, b.id: roomy], active: nil, now: now) == nil)
+    #expect(Planner.best([a, b], usage: [a.id: fableNear, b.id: roomy], active: a.id, now: now) == a.id)
 }
 
 @Test func scheduleIgnoresLightOvernightAgentTraffic() {

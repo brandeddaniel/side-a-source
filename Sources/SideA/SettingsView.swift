@@ -203,8 +203,8 @@ struct AutopilotSettings: View {
                     Text("Adds a silent Claude Code hook.")
                 }
                 Toggle(isOn: $store.fixFableSessions) {
-                    Text("Fix running Fable sessions")
-                    Text("When a session's account runs out of Fable, types into its Ghostty tab: moves it to an account with Fable left, or switches it to Opus.")
+                    Text("Move running sessions before a limit")
+                    Text("Between turns, when a session's account reaches 90% of a limit it needs, types into its Ghostty tab to move it to an account with room, or switches a Fable session to Opus.")
                 }
                 Toggle(isOn: Binding(get: { store.opusFallback }, set: { value in Task { await store.setOpusFallback(value) } })) {
                     Text("Fall back to Opus when a model is unavailable")

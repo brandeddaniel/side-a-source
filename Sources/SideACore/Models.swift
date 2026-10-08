@@ -188,7 +188,7 @@ public struct WorkSchedule: Equatable, Sendable {
 /// soonest is used before it refills.
 public enum Planner {
     public static let full = 97.0
-    static let switchTarget = 90.0
+    public static let switchTarget = 90.0
     static let week = 7 * 24 * 3600.0
 
     static func live(_ window: UsageWindow?, _ now: Double) -> UsageWindow? {
@@ -205,6 +205,19 @@ public enum Planner {
     public static func hasHeadroom(_ usage: AccountUsage, now: Double, ignoringModelLimits: Bool = false) -> Bool {
         (live(usage.fiveHour, now)?.percent ?? 0) < full
             && (tightestWeekly(usage, now, ignoringModelLimits: ignoringModelLimits)?.percent ?? 0) < full
+    }
+
+    /// A running session should leave this account between turns: a limit it depends on (5-hour,
+    /// weekly, and Fable's own weekly for a Fable session) has reached the switch target.
+    public static func shouldLeave(_ usage: AccountUsage, onFable: Bool, now: Double) -> Bool {
+        let limits = [usage.fiveHour, usage.weekly] + (onFable ? [usage.fable] : [])
+        return limits.contains { (live($0, now)?.percent ?? 0) >= switchTarget }
+    }
+
+    /// A session on this account cannot run: a limit it depends on is spent.
+    public static func isSpent(_ usage: AccountUsage, onFable: Bool, now: Double) -> Bool {
+        let limits = [usage.fiveHour, usage.weekly] + (onFable ? [usage.fable] : [])
+        return limits.contains { (live($0, now)?.percent ?? 0) >= full }
     }
 
     /// Fable first: an account with Fable room left. Only when every Fable limit is spent does it
@@ -248,7 +261,10 @@ public enum Planner {
         let eligible = candidates.filter { account in
             guard account.ready, account.allowAuto, let value = usage[account.id], !value.stale else { return false }
             // Only move to an account with real room; the active one may run up to the limit.
-            return hasHeadroom(value, now: now, ignoringModelLimits: ignoringModelLimits) && (account.id == active || (live(value.fiveHour, now)?.percent ?? 0) < switchTarget)
+            // A new pick also needs room below the switch target, so sessions are not sent to an account about to run out.
+            return hasHeadroom(value, now: now, ignoringModelLimits: ignoringModelLimits) && (account.id == active
+                || ((live(value.fiveHour, now)?.percent ?? 0) < switchTarget
+                    && (tightestWeekly(value, now, ignoringModelLimits: ignoringModelLimits)?.percent ?? 0) < switchTarget))
         }
         guard let top = eligible.map({ urgency(usage[$0.id]!, now: now) }).max() else { return nil }
         let pick = eligible.filter { urgency(usage[$0.id]!, now: now) >= top * 0.75 }
