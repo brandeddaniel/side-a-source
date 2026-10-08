@@ -419,8 +419,24 @@ final class AccountStore {
         await refresh(config.accounts.filter { $0.ready
             && (dueForRead($0) || (force && Date().timeIntervalSince(usageAt[$0.id] ?? .distantPast) > 60)) }.map(\.id))
     }
-    /// What Autopilot may act on: accounts with a trustworthy latest reading.
-    private var plannable: [String: AccountUsage] { usage.filter { !failing.contains($0.key) } }
+    /// What Autopilot may act on: accounts with a trustworthy latest reading, plus any account a
+    /// running session just hit a limit on (its own error is proof, even while reads are failing).
+    private var plannable: [String: AccountUsage] {
+        var value = usage.filter { !failing.contains($0.key) }
+        for (id, evidence) in limitEvidence { value[id] = evidence }
+        return value
+    }
+    /// Accounts with a limit a session reported hitting after the account's last successful reading.
+    private var limitEvidence: [String: AccountUsage] {
+        let now = Date().timeIntervalSince1970
+        var result: [String: AccountUsage] = [:]
+        for session in sessions {
+            guard let id = session.accountID, let limit = session.limitHit, let at = session.limitAt else { continue }
+            result[id] = Planner.withEvidence(result[id] ?? usage[id], limit: limit, at: at,
+                                              readAt: readAt[id]?.timeIntervalSince1970 ?? 0, now: now)
+        }
+        return result
+    }
     private struct UsageCache: Codable {
         var usage: [String: AccountUsage]; var at: [String: Date]
         var backoff: [String: Date]?; var primed: [String: Date]?
@@ -519,7 +535,7 @@ final class AccountStore {
             if state.installed { notify("Fable is spent on every account", "New claude commands use Opus for Fable until a Fable limit resets.") }
         }
     }
-    enum SessionAction: String { case opus, move, focus, rescue }
+    enum SessionAction: String { case opus, move, focus, rescue, opusContinue = "opus-continue" }
     /// Types into the session's Ghostty tab: `/model opus`, `/exit` and a resume on the current
     /// account, or for a rescue Esc first and `continue` after. Returns the failure, if any.
     @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true, automatic: Bool = false) async -> String? {
@@ -543,6 +559,7 @@ final class AccountStore {
     }
     /// A reading Autopilot may act on: read in the last 10 minutes and not failing.
     private func trusted(_ id: String) -> AccountUsage? {
+        if let evidence = limitEvidence[id] { return evidence }
         guard !failing.contains(id), Date().timeIntervalSince(readAt[id] ?? .distantPast) < 600 else { return nil }
         return usage[id]
     }
@@ -554,11 +571,23 @@ final class AccountStore {
     }
     private func rescueStuck(now: Double) async {
         guard rescueStuckSessions else { return }
-        for session in sessions where session.inTerminal && session.looksStuck(now: now)
-            && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
+        for session in sessions where session.inTerminal && (session.limitHit != nil || session.looksStuck(now: now))
+            && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
-                  Planner.isExhausted(value, onFable: session.onFable, now: now),
-                  let target = roomyTarget(for: session, now: now) else { continue }
+                  Planner.isExhausted(value, onFable: session.onFable, now: now) else { continue }
+            guard let target = roomyTarget(for: session, now: now) else {
+                // A Fable limit with no Fable left anywhere: carry on in Opus.
+                if session.limitHit == "fable", session.status == "idle", !switchedToOpus.contains(session.pid) {
+                    fixedAt[session.pid] = Date()
+                    if let failure = await act(on: session.pid, .opusContinue, reportError: false, automatic: true) {
+                        notify("Couldn't switch \(session.name ?? "a session") to Opus", failure)
+                    } else {
+                        switchedToOpus.insert(session.pid)
+                        notify("Switched \(session.name ?? "a session") to Opus", "It hit its Fable limit and no account has Fable left; it continued in Opus.")
+                    }
+                }
+                continue
+            }
             fixedAt[session.pid] = Date()
             let name = session.name ?? "A session"
             let account = config.accounts.first { $0.id == target }?.name ?? "another account"
@@ -576,7 +605,7 @@ final class AccountStore {
     private func fixSessions(fableSpentEverywhere: Bool) async {
         guard fixFableSessions else { return }
         let now = Date().timeIntervalSince1970
-        for session in sessions where session.inTerminal && session.status == "idle"
+        for session in sessions where session.inTerminal && session.status == "idle" && session.limitHit == nil
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }

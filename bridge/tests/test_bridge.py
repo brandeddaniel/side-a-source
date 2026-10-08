@@ -236,8 +236,8 @@ class BridgeTests(unittest.TestCase):
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
              patch.object(bridge,'mac_email',return_value='a@x'), patch.object(bridge,'read_secret',return_value=None):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
-        self.assertEqual(result,[{'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
-                                 {'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
+        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
+                                 {'limitHit':None,'limitAt':None,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
     def test_a_session_is_attributed_to_whoever_its_slot_login_belongs_to(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}
@@ -285,6 +285,18 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.proc_argv(child.pid)[-2:],['import time; time.sleep(30)','a b'])
         finally:
             child.kill(); child.wait()
+    def test_a_limit_error_reply_is_read_as_the_limit_the_session_hit(self):
+        home=self.root/'home'; project=home/'.claude/projects/-x'; project.mkdir(parents=True)
+        error=lambda text: json.dumps({'type':'assistant','isApiErrorMessage':True,'error':'rate_limit','timestamp':'2026-10-07T20:00:00Z',
+                                       'message':{'model':'<synthetic>','content':[{'type':'text','text':text}]}})
+        ok=json.dumps({'type':'assistant','message':{'model':'claude-fable-5-1','content':[{'type':'text','text':'done'}]}})
+        (project/'f.jsonl').write_text(ok+'\n'+error("You've reached your Fable limit. Run /usage-credits to continue")+'\n')
+        (project/'w.jsonl').write_text(error("You've hit your weekly limit · resets Oct 9 at 7am")+'\n')
+        (project/'r.jsonl').write_text(error("You've hit your session limit · resets 9:40pm")+'\n'+ok+'\n')
+        with patch.object(Path,'home',return_value=home):
+            self.assertEqual(bridge.session_limit('f'),('fable',bridge.epoch('2026-10-07T20:00:00Z')))
+            self.assertEqual(bridge.session_limit('w')[0],'weekly')
+            self.assertEqual(bridge.session_limit('r'),(None,None))  # a later normal reply: recovered
     def test_a_half_written_session_file_is_skipped(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         (sessions/'1.json').write_text('{"pid": 1, "sess')

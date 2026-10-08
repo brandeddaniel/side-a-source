@@ -99,6 +99,9 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     public var status: String?
     /// When the status last changed, in seconds since 1970.
     public var statusSince: Double?
+    /// The limit its latest reply says it hit ("fable", "session", "weekly"), and when.
+    public var limitHit: String?
+    public var limitAt: Double?
     /// "cli" for a session in a terminal; "sdk-cli" for a headless `claude -p` job, which has no tab.
     public var entrypoint: String?
     /// Side A can type into it: it runs in a terminal tab.
@@ -218,6 +221,23 @@ public enum Planner {
     public static func shouldLeave(_ usage: AccountUsage, onFable: Bool, now: Double) -> Bool {
         let limits = [usage.fiveHour, usage.weekly] + (onFable ? [usage.fable] : [])
         return limits.contains { (live($0, now)?.percent ?? 0) >= switchTarget }
+    }
+
+    /// A reading with a limit a session reported hitting raised to 100%, when that report is newer
+    /// than the reading: the session's own error is proof even while the usage endpoint can't be read.
+    public static func withEvidence(_ usage: AccountUsage?, limit: String, at: Double, readAt: Double, now: Double) -> AccountUsage {
+        var value = usage ?? AccountUsage(windows: [])
+        guard at > readAt else { return value }
+        let id = limit == "fable" ? "seven_day_model:fable" : limit == "weekly" ? "seven_day" : "five_hour"
+        // The reset isn't in the error; hold it for an hour, after which a fresh reading decides.
+        let window = UsageWindow(id: id, label: id, percent: 100, resetsAt: now + 3600)
+        if let index = value.windows.firstIndex(where: { $0.id == id }) {
+            value.windows[index].percent = 100
+            value.windows[index].resetsAt = max(value.windows[index].resetsAt ?? 0, now + 60)
+        } else {
+            value.windows.append(window)
+        }
+        return value
     }
 
     /// A session on this account cannot make requests at all: a limit it needs is at 100%.

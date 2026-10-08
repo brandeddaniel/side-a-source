@@ -171,6 +171,18 @@ import Testing
     #expect(Planner.best([a, b], usage: [a.id: fableNear, b.id: roomy], active: a.id, now: now) == a.id)
 }
 
+@Test func aSessionsLimitErrorCountsUntilANewerReading() {
+    let now = 1_000_000.0
+    let stale = AccountUsage(windows: [UsageWindow(id: "five_hour", label: "", percent: 0, resetsAt: now + 9000),
+                                       UsageWindow(id: "seven_day_model:fable", label: "", percent: 53, resetsAt: now + 90_000)])
+    let raised = Planner.withEvidence(stale, limit: "fable", at: now - 60, readAt: now - 900, now: now)
+    #expect(raised.fable?.percent == 100 && Planner.isExhausted(raised, onFable: true, now: now))
+    #expect(!Planner.isExhausted(raised, onFable: false, now: now))
+    // A reading taken after the error wins.
+    #expect(Planner.withEvidence(stale, limit: "fable", at: now - 900, readAt: now - 60, now: now).fable?.percent == 53)
+    #expect(Planner.withEvidence(nil, limit: "session", at: now, readAt: 0, now: now).fiveHour?.percent == 100)
+}
+
 @Test func scheduleIgnoresLightOvernightAgentTraffic() {
     // A real 14-day histogram: overnight agents run at up to 13% of the peak.
     let hours = [1095, 1542, 1584, 1586, 2286, 457, 289, 287, 16888, 20207, 18177, 15070, 14568, 18778,

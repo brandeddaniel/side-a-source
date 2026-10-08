@@ -739,6 +739,30 @@ def session_model(session_id):
     return session_state(session_id)[0]
 
 
+LIMIT_KINDS = (("fable", "fable limit"), ("weekly", "weekly limit"), ("session", "session limit"))
+
+
+def session_limit(session_id):
+    """The limit the session's latest main-thread reply says it hit, and when: Claude Code writes a
+    rate_limit API error reply ("You've reached your Fable limit", "You've hit your session limit",
+    "... weekly limit"). Direct evidence, for when the usage endpoint can't be read."""
+    for line in reversed(transcript_tail(session_id)):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("type") != "assistant" or entry.get("isSidechain"):
+            continue
+        if not (entry.get("isApiErrorMessage") and entry.get("error") == "rate_limit"):
+            return None, None
+        content = (entry.get("message") or {}).get("content")
+        text = (content if isinstance(content, str) else " ".join(
+            part.get("text", "") for part in content or [] if isinstance(part, dict))).lower()
+        kind = next((kind for kind, phrase in LIMIT_KINDS if phrase in text), None)
+        return kind, epoch(entry.get("timestamp"))
+    return None, None
+
+
 def live_sessions(root, config):
     """Running Claude Code sessions, the model each last replied with, and the account it runs on:
     the profile in its environment, or the Mac login when it has none."""
@@ -775,7 +799,8 @@ def live_sessions(root, config):
                     mac = ""
             account = mac or None
         since = data.get("statusUpdatedAt")
-        sessions.append({"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
+        limit, limit_at = session_limit(data["sessionId"])
+        sessions.append({"limitHit": limit, "limitAt": limit_at,"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
                          "statusSince": since / 1000 if isinstance(since, (int, float)) else None,
                          "model": session_model(data["sessionId"]), "accountID": account})
     return sorted(sessions, key=lambda item: item["pid"])
@@ -1019,8 +1044,11 @@ def session_action(root, pid, action, automatic=False):
             in_use = True  # can't tell: leave the tab alone rather than risk typing over the user
         if in_use:
             raise ValueError("Skipped: that tab is in front, and you may be typing in it.")
-    if action == "opus":
+    if action in ("opus", "opus-continue"):
         osascript(GHOSTTY_TYPE, terminal["id"], "/model opus")
+        if action == "opus-continue":
+            time.sleep(2)
+            osascript(GHOSTTY_TYPE, terminal["id"], "continue")
         return
     record = lambda number: read_json_quiet(Path.home() / ".claude" / "sessions" / f"{number}.json", {}) or {}
     if action == "rescue":
@@ -1095,7 +1123,7 @@ def main():
     commands.add_parser("sessions")
     action = commands.add_parser("session")
     action.add_argument("pid", type=int)
-    action.add_argument("action", choices=["opus", "move", "focus", "rescue"])
+    action.add_argument("action", choices=["opus", "opus-continue", "move", "focus", "rescue"])
     action.add_argument("--auto", action="store_true")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
