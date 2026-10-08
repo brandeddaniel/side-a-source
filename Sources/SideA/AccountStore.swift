@@ -443,12 +443,17 @@ final class AccountStore {
     }
     private func notify(_ title: String, _ body: String) {
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
+        Self.post(title, body)
+    }
+    /// Nonisolated: the authorization callback runs on a background queue, and a closure formed in
+    /// this main-actor class would trap there under Swift 6's isolation checks.
+    private nonisolated static func post(_ title: String, _ body: String) {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
             content.title = title; content.body = body
-            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
     }
     @discardableResult private func refreshActive() async -> Bool {
