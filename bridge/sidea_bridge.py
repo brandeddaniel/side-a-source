@@ -827,15 +827,15 @@ def live_sessions(root, config):
     return sorted(sessions, key=lambda item: item["pid"])
 
 
+# One Apple event for all terminals: Ghostty can be slow to answer, and three per terminal adds up.
 GHOSTTY_LIST = """on run argv
     if application "Ghostty" is not running then return ""
+    tell application "Ghostty" to set {ids, dirs, names} to {id, working directory, name} of every terminal
+    set sep to character id 9
     set out to ""
-    set sep to character id 9 -- inside the tell block, `tab` is Ghostty's tab class
-    tell application "Ghostty"
-        repeat with t in terminals
-            set out to out & (id of t) & sep & (working directory of t) & sep & (name of t) & linefeed
-        end repeat
-    end tell
+    repeat with i from 1 to count of ids
+        set out to out & (item i of ids) & sep & (item i of dirs) & sep & (item i of names) & linefeed
+    end repeat
     return out
 end run"""
 
@@ -875,7 +875,10 @@ end run"""
 
 
 def osascript(script, *args):
-    result = subprocess.run(["osascript", "-", *args], input=script, capture_output=True, text=True, timeout=20)
+    try:
+        result = subprocess.run(["osascript", "-", *args], input=script, capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        raise ValueError("Ghostty is not responding right now; Side A will try again.") from None
     if result.returncode != 0:
         if "-1743" in result.stderr:
             raise ValueError("Allow Side A to control Ghostty in System Settings > Privacy & Security > Automation.")

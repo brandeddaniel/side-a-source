@@ -551,7 +551,7 @@ final class AccountStore {
         guard !isDemo, !actingOn.contains(pid) else { return "Already working on this session." }
         actingOn.insert(pid); defer { actingOn.remove(pid) }
         // Above the bridge's own worst case (its waits plus several Ghostty calls), so it is never cut off mid-move.
-        let timeout: TimeInterval = action == .rescue ? 360 : action == .focus ? 30 : 240
+        let timeout: TimeInterval = action == .rescue ? 600 : action == .focus ? 60 : 420
         do { _ = try await bridgeOutput(["session", String(pid), action.rawValue] + (automatic ? ["--auto"] : []), timeout: timeout) }
         catch {
             if reportError { self.error = error.localizedDescription }
