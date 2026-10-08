@@ -739,6 +739,26 @@ def session_model(session_id):
     return session_state(session_id)[0]
 
 
+def session_activity(session_id):
+    """When the transcript last changed, and whether its last main-thread entry ends a turn.
+    Claude Code marks a session "busy" while background tasks run, so status alone can't tell
+    a stuck turn from one that finished and is waiting."""
+    last, ended = None, False
+    for line in reversed(transcript_tail(session_id)):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("isSidechain") or not entry.get("timestamp"):
+            continue
+        if last is None:
+            last = epoch(entry["timestamp"])
+        if entry.get("type") in ("assistant", "user", "system"):
+            ended = entry.get("type") == "system" and entry.get("subtype") == "turn_duration"
+            break
+    return last, ended
+
+
 LIMIT_KINDS = (("fable", "fable limit"), ("weekly", "weekly limit"), ("session", "session limit"))
 
 
@@ -800,7 +820,8 @@ def live_sessions(root, config):
             account = mac or None
         since = data.get("statusUpdatedAt")
         limit, limit_at = session_limit(data["sessionId"])
-        sessions.append({"limitHit": limit, "limitAt": limit_at,"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
+        activity, ended = session_activity(data["sessionId"])
+        sessions.append({"limitHit": limit, "limitAt": limit_at, "lastActivity": activity, "turnEnded": ended,"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
                          "statusSince": since / 1000 if isinstance(since, (int, float)) else None,
                          "model": session_model(data["sessionId"]), "accountID": account})
     return sorted(sessions, key=lambda item: item["pid"])

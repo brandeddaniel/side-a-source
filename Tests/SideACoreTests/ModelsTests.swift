@@ -147,6 +147,12 @@ import Testing
     // Review: a fresh permission prompt is not stuck, and Esc would deny it.
     #expect(!LiveSession(pid: 5, status: "waiting", statusSince: now - 5).looksStuck(now: now))
     #expect(LiveSession(pid: 2, status: "busy", statusSince: now - 3600).looksStuck(now: now))
+    var waitingOnBackground = LiveSession(pid: 6, status: "busy", statusSince: now - 5400)
+    waitingOnBackground.turnEnded = true
+    #expect(!waitingOnBackground.looksStuck(now: now))
+    var stillWriting = LiveSession(pid: 7, status: "busy", statusSince: now - 5400)
+    stillWriting.lastActivity = now - 60
+    #expect(!stillWriting.looksStuck(now: now))
     #expect(!LiveSession(pid: 3, status: "busy", statusSince: now - 700).looksStuck(now: now))
     #expect(!LiveSession(pid: 4, status: "idle", statusSince: now - 9000).looksStuck(now: now))
 }

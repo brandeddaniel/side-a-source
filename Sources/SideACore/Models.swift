@@ -102,6 +102,9 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     /// The limit its latest reply says it hit ("fable", "session", "weekly"), and when.
     public var limitHit: String?
     public var limitAt: Double?
+    /// When its transcript last changed, and whether its last entry ended a turn.
+    public var lastActivity: Double?
+    public var turnEnded: Bool?
     /// "cli" for a session in a terminal; "sdk-cli" for a headless `claude -p` job, which has no tab.
     public var entrypoint: String?
     /// Side A can type into it: it runs in a terminal tab.
@@ -116,9 +119,13 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     /// Waiting on the user for 10 minutes, or "busy" for 15: on an account that is out of a limit
     /// the session needs, that is Claude Code's limit prompt or a turn stuck retrying the limit.
     /// A short wait is a normal permission prompt; a long busy turn on a working account is work.
+    /// "Busy" also covers a finished turn waiting on background tasks, so a busy session counts as
+    /// stuck only when its turn has not ended and its transcript has been silent for 15 minutes.
     public func looksStuck(now: Double) -> Bool {
         let elapsed = now - (statusSince ?? now)
-        return (status == "waiting" && elapsed > 600) || (status == "busy" && elapsed > 900)
+        if status == "waiting" { return elapsed > 600 }
+        guard status == "busy", elapsed > 900, turnEnded != true else { return false }
+        return now - (lastActivity ?? statusSince ?? now) > 900
     }
 }
 

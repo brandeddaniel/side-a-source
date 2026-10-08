@@ -236,8 +236,8 @@ class BridgeTests(unittest.TestCase):
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
              patch.object(bridge,'mac_email',return_value='a@x'), patch.object(bridge,'read_secret',return_value=None):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
-        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
-                                 {'limitHit':None,'limitAt':None,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
+        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
+                                 {'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
     def test_a_session_is_attributed_to_whoever_its_slot_login_belongs_to(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}
@@ -297,6 +297,14 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.session_limit('f'),('fable',bridge.epoch('2026-10-07T20:00:00Z')))
             self.assertEqual(bridge.session_limit('w')[0],'weekly')
             self.assertEqual(bridge.session_limit('r'),(None,None))  # a later normal reply: recovered
+    def test_activity_tells_a_finished_turn_from_a_stuck_one(self):
+        home=self.root/'home'; project=home/'.claude/projects/-x'; project.mkdir(parents=True)
+        entry=lambda kind,ts,**extra: json.dumps({'type':kind,'timestamp':ts,**extra})
+        (project/'done.jsonl').write_text(entry('assistant','2026-10-07T20:00:00Z')+'\n'+entry('system','2026-10-07T20:00:05Z',subtype='turn_duration')+'\n')
+        (project/'mid.jsonl').write_text(entry('assistant','2026-10-07T20:00:00Z')+'\n'+entry('user','2026-10-07T20:01:00Z')+'\n')
+        with patch.object(Path,'home',return_value=home):
+            self.assertEqual(bridge.session_activity('done'),(bridge.epoch('2026-10-07T20:00:05Z'),True))
+            self.assertEqual(bridge.session_activity('mid'),(bridge.epoch('2026-10-07T20:01:00Z'),False))
     def test_a_half_written_session_file_is_skipped(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         (sessions/'1.json').write_text('{"pid": 1, "sess')
