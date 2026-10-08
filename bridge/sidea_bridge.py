@@ -11,7 +11,6 @@ Tokens are never logged or printed.
 from __future__ import annotations
 import argparse
 import contextlib
-import contextlib
 import datetime
 import fcntl
 import functools
@@ -21,6 +20,7 @@ import os
 import re
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -55,6 +55,14 @@ def read_json(path: Path, default=None):
     try:
         return json.loads(path.read_text())
     except FileNotFoundError:
+        return default
+
+
+def read_json_quiet(path: Path, default=None):
+    """For files other programs write (session records): a half-written one is skipped, not fatal."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
         return default
 
 
@@ -390,11 +398,12 @@ def shell_snippet(root):
     # The fable alias is remapped only while Side A asks for it, and only unset if Side A set it.
     # It also runs once when sourced: preexec for `source ~/.zshrc && claude` fired before the hook existed.
     return (f"{SHELL_MARK}\n"
-            f"_side_a_select() {{ local d m; d=\"$(cat {selector} 2>/dev/null)\"; "
-            f"[ -f {selector} ] && export CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$d\" || unset CLAUDE_SECURESTORAGE_CONFIG_DIR; "
-            f"m=\"$(cat {fable} 2>/dev/null)\"; "
+            f"_side_a_select() {{ local d= m=; "
+            f"if [ -f {selector} ]; then d=\"$(<{selector})\"; export CLAUDE_SECURESTORAGE_CONFIG_DIR=\"$d\"; "
+            f"else unset CLAUDE_SECURESTORAGE_CONFIG_DIR; fi; "
+            f"[ -f {fable} ] && m=\"$(<{fable})\"; "
             f"if [ -n \"$m\" ]; then export ANTHROPIC_DEFAULT_FABLE_MODEL=\"$m\" _SIDE_A_FABLE=1; "
-            f"elif [ -n \"$_SIDE_A_FABLE\" ]; then unset ANTHROPIC_DEFAULT_FABLE_MODEL _SIDE_A_FABLE; fi; }}; "
+            f"elif [ -n \"${{_SIDE_A_FABLE-}}\" ]; then unset ANTHROPIC_DEFAULT_FABLE_MODEL _SIDE_A_FABLE; fi; }}; "
             f"autoload -Uz add-zsh-hook && add-zsh-hook preexec _side_a_select && _side_a_select\n")
 
 
@@ -738,7 +747,7 @@ def live_sessions(root, config):
     owners = {}
     sessions = []
     for path in (Path.home() / ".claude" / "sessions").glob("*.json"):
-        data = read_json(path, None)
+        data = read_json_quiet(path, None)
         pid = data.get("pid") if isinstance(data, dict) else None
         if not isinstance(pid, int) or not isinstance(data.get("sessionId"), str) or data.get("cwd") == str(root):
             continue
@@ -799,12 +808,23 @@ GHOSTTY_KEY = """on run argv
     tell application "Ghostty" to send key (item 2 of argv) to (first terminal whose id is (item 1 of argv))
 end run"""
 
+# Ctrl+U first clears anything half-typed in the prompt, so the text is never joined onto a draft.
 GHOSTTY_TYPE = """on run argv
     tell application "Ghostty"
         set t to first terminal whose id is (item 1 of argv)
+        send key "u" modifiers "control" to t
         input text (item 2 of argv) to t
         send key "enter" to t
     end tell
+end run"""
+
+# Whether this terminal is the one in front while Ghostty is the active app: the user may be typing.
+GHOSTTY_IN_USE = """on run argv
+    tell application "Ghostty"
+        if not frontmost then return "no"
+        if id of focused terminal of selected tab of front window is (item 1 of argv) then return "yes"
+    end tell
+    return "no"
 end run"""
 
 
@@ -828,7 +848,7 @@ def ghostty_terminals():
 
 
 def session_record(pid):
-    data = read_json(Path.home() / ".claude" / "sessions" / f"{pid}.json", None)
+    data = read_json_quiet(Path.home() / ".claude" / "sessions" / f"{pid}.json", None)
     if not isinstance(data, dict) or data.get("pid") != pid or not isinstance(data.get("sessionId"), str):
         raise ValueError("That session is no longer running.")
     try:
@@ -841,15 +861,15 @@ def session_record(pid):
 
 
 def session_terminal(session, records, terminals):
-    """The Ghostty terminal running a session: its title is the session name and its folder matches.
-    Otherwise the only terminal in that folder, when only one session runs there."""
+    """The Ghostty terminal running a session: its title is the session name and its folder matches,
+    or failing that, the terminal showing the session's tty."""
     same_folder = [t for t in terminals if t["cwd"] == session.get("cwd")]
     titles = session_titles(session)
     named = [t for t in same_folder if t["title"] in titles]
     if len(named) == 1:
         return named[0]
-    if len(same_folder) == 1 and sum(r.get("cwd") == session.get("cwd") for r in records) == 1:
-        return same_folder[0]
+    # Otherwise only the exact tty decides: a lone tab in the same folder may be a plain shell
+    # while the session runs in another terminal app.
     marked = terminal_by_tty(session.get("pid"))
     if marked:
         return marked
@@ -881,31 +901,71 @@ def terminal_by_tty(pid):
     return found
 
 
-# Flags that pick the conversation or model are replaced; everything else the session started with is kept.
-RESUME_DROPS = {"-c", "--continue", "-p", "--print"}
-RESUME_DROPS_VALUE = {"--model", "--effort", "--session-id", "-n", "--name"}
+def proc_argv(pid):
+    """A process's exact argv (KERN_PROCARGS2), so arguments containing spaces stay whole."""
+    import ctypes, struct
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+    size = ctypes.c_size_t(0)
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return []
+    buffer = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        return []
+    raw = buffer.raw[:size.value]
+    argc = struct.unpack("i", raw[:4])[0]
+    rest = raw[4:]
+    rest = rest[rest.index(b"\0"):].lstrip(b"\0")  # skip the executable path and its padding
+    return [part.decode(errors="replace") for part in rest.split(b"\0")[:argc]]
+
+
+# Flags kept on a resume. The prompt and anything unknown are dropped: a positional prompt would be
+# sent again, and an unknown flag's value can't be told apart from a prompt.
+RESUME_BOOLEAN = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--verbose",
+                  "--debug", "--chrome", "--no-chrome", "--ide", "--strict-mcp-config", "--brief"}
+RESUME_VALUE = {"--permission-mode", "--append-system-prompt", "--system-prompt", "--settings", "--agent",
+                "--fallback-model", "--setting-sources"}
+RESUME_VARIADIC = {"--add-dir", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+                   "--mcp-config", "--plugin-dir", "--betas"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+MODEL_FAMILIES = ("fable", "opus", "sonnet", "haiku")
 
 
-def resume_command(pid, session_id, model, effort=None):
-    result = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
-    args = result.stdout.split()[1:] if result.returncode == 0 else []
-    kept, skip = [], False
-    for index, arg in enumerate(args):
-        if skip:
-            skip = False
-            continue
-        if arg in RESUME_DROPS:
-            continue
-        if arg in RESUME_DROPS_VALUE:
-            skip = True
-            continue
-        if arg in ("-r", "--resume"):
-            skip = index + 1 < len(args) and not args[index + 1].startswith("-")
-            continue
-        if arg.split("=", 1)[0] in RESUME_DROPS_VALUE | {"--resume"}:
-            continue
-        kept.append(arg)
+def model_family(model):
+    return next((family for family in MODEL_FAMILIES if family in (model or "").lower()), None)
+
+
+def resume_command(pid, session_id, model, effort=None, argv=None):
+    """claude --resume for the same conversation, the session's own flags, and the same model and
+    effort. The original --model value is kept when it is the same model, so a [1m] context survives."""
+    args = (proc_argv(pid) if argv is None else argv)[1:]
+    kept, original_model, index = [], None, 0
+    while index < len(args):
+        arg = args[index]
+        name, _, inline = arg.partition("=")
+        if name == "--model":
+            original_model = inline or (args[index + 1] if index + 1 < len(args) else None)
+            index += 1 if inline else 2
+        elif name in RESUME_BOOLEAN:
+            kept.append(arg); index += 1
+        elif name in RESUME_VALUE:
+            if inline:
+                kept.append(arg); index += 1
+            elif index + 1 < len(args):
+                kept += [arg, args[index + 1]]; index += 2
+            else:
+                index += 1
+        elif name in RESUME_VARIADIC:
+            kept.append(arg); index += 1
+            if not inline:
+                while index < len(args) and not args[index].startswith("-"):
+                    kept.append(args[index]); index += 1
+        else:
+            index += 1  # prompt, --resume/--continue and their values, unknown flags
+    if original_model and model_family(original_model) == model_family(model):
+        model = original_model
+    elif model and "fable" in model:
+        model = "fable"  # the alias, so a spent-everywhere remap still applies
     return ["claude", "--resume", session_id, *kept, *(["--model", model] if model else []),
             *(["--effort", effort] if effort in EFFORTS else [])]
 
@@ -913,7 +973,7 @@ def resume_command(pid, session_id, model, effort=None):
 def live_session_for(session_id, other_than):
     """A running session record for this conversation, other than the given pid."""
     for path in (Path.home() / ".claude" / "sessions").glob("*.json"):
-        data = read_json(path, None)
+        data = read_json_quiet(path, None)
         if isinstance(data, dict) and data.get("sessionId") == session_id and data.get("pid") != other_than:
             try:
                 os.kill(data["pid"], 0)
@@ -941,61 +1001,71 @@ def wait_for(check, seconds, step=0.5):
     return None
 
 
-def session_action(root, pid, action):
+def session_action(root, pid, action, automatic=False):
     """Switches a running session to Opus (`/model opus`), or moves it to the account new commands
     use now: `/exit`, then resume the same conversation in the same tab. `rescue` first presses Esc
-    to end a turn stuck on a spent limit, and afterwards types `continue` so the work carries on."""
+    to end a turn stuck on a spent limit, and afterwards types `continue` so the work carries on.
+    Automatic actions skip the tab in front, where the user may be typing."""
     session = session_record(pid)
-    if action == "rescue":
-        records = [r for r in (read_json(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
-        terminal = session_terminal(session, records, ghostty_terminals())
-        osascript(GHOSTTY_ESCAPE, terminal["id"])
-        idle = lambda: (read_json(Path.home() / ".claude" / "sessions" / f"{pid}.json", {}) or {}).get("status") == "idle"
-        if not wait_for(idle, 30):
-            raise ValueError("Esc did not end the stuck turn; nothing else was typed.")
-        session_action(root, pid, "move")
-        resumed = wait_for(lambda: live_session_for(session["sessionId"], pid), 5)
-        if resumed and wait_for(lambda: (read_json(Path.home() / ".claude" / "sessions" / f"{resumed['pid']}.json", {}) or {}).get("status") == "idle", 60):
-            osascript(GHOSTTY_TYPE, terminal["id"], "continue")
-        return
-    records = [r for r in (read_json(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
+    records = [r for r in (read_json_quiet(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
     terminal = session_terminal(session, records, ghostty_terminals())
     if action == "focus":
         osascript(GHOSTTY_FOCUS, terminal["id"])
         return
+    if automatic:
+        try:
+            in_use = osascript(GHOSTTY_IN_USE, terminal["id"]).strip() == "yes"
+        except ValueError:
+            in_use = True  # can't tell: leave the tab alone rather than risk typing over the user
+        if in_use:
+            raise ValueError("Skipped: that tab is in front, and you may be typing in it.")
     if action == "opus":
         osascript(GHOSTTY_TYPE, terminal["id"], "/model opus")
         return
-    if session.get("status") not in ("idle", "shell"):
+    record = lambda number: read_json_quiet(Path.home() / ".claude" / "sessions" / f"{number}.json", {}) or {}
+    if action == "rescue":
+        osascript(GHOSTTY_ESCAPE, terminal["id"])
+        if not wait_for(lambda: record(pid).get("status") == "idle", 30):
+            raise ValueError("Esc did not end the stuck turn; nothing else was typed.")
+        session = session_record(pid)
+    elif session.get("status") not in ("idle", "shell"):
         raise ValueError("Wait for the session to finish its turn, then move it.")
-    # Same model and effort as before. Fable goes by its alias so a spent-everywhere remap still applies.
     model, effort = session_state(session["sessionId"])
-    if model and "fable" in model:
-        model = "fable"
     command = resume_command(pid, session["sessionId"], model, effort)
     selector = selection_path(root)
     prefix = f"CLAUDE_SECURESTORAGE_CONFIG_DIR={shlex.quote(selector.read_text().strip())} " if selector.exists() else ""
-    osascript(GHOSTTY_TYPE, terminal["id"], "/exit")
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.3)
-    else:
-        raise ValueError("The session did not exit; nothing else was typed.")
     resume = prefix + " ".join(shlex.quote(part) for part in command)
-    osascript(GHOSTTY_TYPE, terminal["id"], resume)
-    # Confirm it came back. A long conversation first asks whether to resume from a summary or in
-    # full; the user's choice is the full session (second option). Only answered while a claude
-    # process resuming this conversation is running and has not started yet.
-    if not wait_for(lambda: live_session_for(session["sessionId"], pid), 10) and resuming(session["sessionId"]):
-        osascript(GHOSTTY_KEY, terminal["id"], "arrowDown")  # Ghostty's key name for the down arrow
-        time.sleep(0.3)
-        osascript(GHOSTTY_KEY, terminal["id"], "enter")
-    if not wait_for(lambda: live_session_for(session["sessionId"], pid), 45):
-        raise ValueError(f"{session.get('name') or 'The session'} did not restart; it may be asking a question in its tab. To restart it yourself: {resume}")
+    osascript(GHOSTTY_TYPE, terminal["id"], "/exit")
+    if not wait_for(lambda: not process_alive(pid), 20, 0.3):
+        raise ValueError("The session did not exit; nothing else was typed.")
+    # From here the session has exited: every failure says how to bring it back.
+    name = session.get("name") or "The session"
+    try:
+        osascript(GHOSTTY_TYPE, terminal["id"], resume)
+        # A long conversation first asks whether to resume from a summary or in full; the user's
+        # choice is the full session (second option). Only answered while a claude process resuming
+        # this conversation is running and still has not started after 20 seconds.
+        if not wait_for(lambda: live_session_for(session["sessionId"], pid), 20) and resuming(session["sessionId"]):
+            osascript(GHOSTTY_KEY, terminal["id"], "arrowDown")  # Ghostty's key name for the down arrow
+            time.sleep(0.3)
+            osascript(GHOSTTY_KEY, terminal["id"], "enter")
+        resumed = wait_for(lambda: live_session_for(session["sessionId"], pid), 45)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError(f"{name} exited but did not restart ({error}). In its tab, run: {resume}") from None
+    if not resumed:
+        raise ValueError(f"{name} did not restart; it may be asking a question in its tab. To restart it yourself: {resume}")
+    if action == "rescue" and wait_for(lambda: record(resumed["pid"]).get("status") == "idle", 60):
+        osascript(GHOSTTY_TYPE, terminal["id"], "continue")
+
+
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def limit_hook_installed():
@@ -1004,6 +1074,8 @@ def limit_hook_installed():
 
 
 def main():
+    # The app's watchdog sends SIGTERM; exiting normally lets `finally` release Claude Code's refresh lock.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     # Own process group, so the app's watchdog can stop any claude or codex child with us.
     try:
         os.setpgid(0, 0)
@@ -1024,6 +1096,7 @@ def main():
     action = commands.add_parser("session")
     action.add_argument("pid", type=int)
     action.add_argument("action", choices=["opus", "move", "focus", "rescue"])
+    action.add_argument("--auto", action="store_true")
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     os.umask(0o077)
@@ -1041,7 +1114,7 @@ def main():
         print(json.dumps({"installed": shell_installed(root)}))
         return
     if args.command == "session":
-        session_action(root, args.pid, args.action)
+        session_action(root, args.pid, args.action, automatic=args.auto)
         return
     if args.command == "fable":
         if args.state != "status":

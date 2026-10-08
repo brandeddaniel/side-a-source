@@ -44,6 +44,7 @@ final class AccountStore {
         didSet { UserDefaults.standard.set(fixFableSessions, forKey: "sidea.fixFableSessions") }
     }
     @ObservationIgnored private var fixedAt: [Int: Date] = [:]
+    @ObservationIgnored private var switchedToOpus: Set<Int> = []
     /// Fable sessions already reported as stuck, until they move on.
     @ObservationIgnored private var stuckNotified: Set<Int> = []
     @ObservationIgnored private var reportAt = Date.distantPast
@@ -138,7 +139,8 @@ final class AccountStore {
             // Readings from before model-scoped limits (Fable) were tracked are re-read at once.
             usage = cache.usage; usageAt = cache.modelLimits == true ? cache.at : [:]
             backoffUntil = cache.backoff ?? [:]; primedAt = cache.primed ?? [:]; failing = Set(cache.failing ?? [])
-            for id in failing { failingSince[id] = .distantPast }
+            // Counted from now: one old failure must not move the Mac off its account at launch.
+            for id in failing { failingSince[id] = Date() }
             activeIDs = (cache.active ?? [:]).reduce(into: [:]) { ids, item in AgentProvider(rawValue: item.key).map { ids[$0] = item.value } }
         }
         if !isDemo {
@@ -520,10 +522,12 @@ final class AccountStore {
     enum SessionAction: String { case opus, move, focus, rescue }
     /// Types into the session's Ghostty tab: `/model opus`, `/exit` and a resume on the current
     /// account, or for a rescue Esc first and `continue` after. Returns the failure, if any.
-    @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true) async -> String? {
+    @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true, automatic: Bool = false) async -> String? {
         guard !isDemo, !actingOn.contains(pid) else { return "Already working on this session." }
         actingOn.insert(pid); defer { actingOn.remove(pid) }
-        do { _ = try await bridgeOutput(["session", String(pid), action.rawValue], timeout: action == .rescue ? 180 : 90) }
+        // Above the bridge's own worst case (its waits plus several Ghostty calls), so it is never cut off mid-move.
+        let timeout: TimeInterval = action == .rescue ? 360 : action == .focus ? 30 : 240
+        do { _ = try await bridgeOutput(["session", String(pid), action.rawValue] + (automatic ? ["--auto"] : []), timeout: timeout) }
         catch {
             if reportError { self.error = error.localizedDescription }
             return error.localizedDescription
@@ -553,12 +557,12 @@ final class AccountStore {
         for session in sessions where session.inTerminal && session.looksStuck(now: now)
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
-                  Planner.isSpent(value, onFable: session.onFable, now: now),
+                  Planner.isExhausted(value, onFable: session.onFable, now: now),
                   let target = roomyTarget(for: session, now: now) else { continue }
             fixedAt[session.pid] = Date()
             let name = session.name ?? "A session"
             let account = config.accounts.first { $0.id == target }?.name ?? "another account"
-            if let failure = await act(on: session.pid, .rescue, reportError: false) {
+            if let failure = await act(on: session.pid, .rescue, reportError: false, automatic: true) {
                 notify("Couldn't rescue \(name)", failure)
             } else {
                 notify("Rescued \(name)", "Its account ran out, so it moved to \(account) and continued where it stopped.")
@@ -577,17 +581,19 @@ final class AccountStore {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }
             let target = roomyTarget(for: session, now: now)
-            let fableOnly = session.onFable && !Planner.shouldLeave(value, onFable: false, now: now)
+            // Already switched to Opus: its last reply stays Fable until the next turn, so don't repeat it.
+            let fableOnly = session.onFable && !Planner.shouldLeave(value, onFable: false, now: now) && !switchedToOpus.contains(session.pid)
             guard target != nil || fableOnly else { continue }
             fixedAt[session.pid] = Date()
             let name = session.name ?? "A session"
             let from = config.accounts.first { $0.id == id }?.name ?? "Its account"
-            if let failure = await act(on: session.pid, target != nil ? .move : .opus, reportError: false) {
+            if let failure = await act(on: session.pid, target != nil ? .move : .opus, reportError: false, automatic: true) {
                 notify("Couldn't move \(name)", failure)
             } else if let target {
                 let account = config.accounts.first { $0.id == target }?.name ?? "another account"
                 notify("Moved \(name) to \(account)", "\(from) is close to a limit; the conversation continues where it was.")
             } else {
+                switchedToOpus.insert(session.pid)
                 notify("Switched \(name) to Opus", "\(from) is nearly out of Fable and no account has Fable to spare.")
             }
         }
@@ -642,6 +648,8 @@ final class AccountStore {
         await refresh(config.accounts.filter { $0.ready && dueForRead($0) }.map(\.id))
         Task { await refreshReport(maxAge: 3600) }
         Task { await refreshSessions() }
+        // The Fable remap only makes sense while Autopilot steers Terminal; never leave it behind.
+        if !config.smartMode || !shellSwitching { await setFableToOpus(false) }
         guard config.smartMode else { return }
         let now = Date().timeIntervalSince1970
         // Codex: the desktop app keeps its own copy of the login, and OpenAI revokes a login
@@ -649,13 +657,13 @@ final class AccountStore {
         for provider in [AgentProvider.claude] where unknownLogins[provider] == nil && shellSwitching {
             let accounts = config.accounts.filter { $0.provider == provider }
             let current = activeIDs[provider]
+            let pick = Planner.pick(accounts, usage: plannable, active: current, now: now)
+            await setFableToOpus(pick.fableSpent)
             // A failed read is not evidence of a limit; only a signed-out active account moves.
             if let current, failing.contains(current), usage[current]?.stale != true,
                Date().timeIntervalSince(failingSince[current] ?? Date()) < 600 { continue }
             // An account with Autopilot off is never switched away from automatically.
             if let current, config.accounts.first(where: { $0.id == current })?.allowAuto == false { continue }
-            let pick = Planner.pick(accounts, usage: plannable, active: current, now: now)
-            await setFableToOpus(pick.fableSpent)
             if let best = pick.id, best != current {
                 let from = config.accounts.first { $0.id == current }?.name
                 await activate(best)
@@ -708,8 +716,11 @@ final class AccountStore {
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             if process.terminationStatus != 0 {
-                let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "Account verification failed."
-                throw BridgeFailure(message: message.trimmingCharacters(in: .whitespacesAndNewlines))
+                let message = (String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw BridgeFailure(message: message.isEmpty
+                    ? (process.terminationReason == .uncaughtSignal || process.terminationStatus == 143 ? "Timed out; Side A stopped waiting." : "Failed without a reason.")
+                    : message)
             }
             return data
         }.value

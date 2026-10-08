@@ -208,7 +208,7 @@ struct AutopilotSettings: View {
                 }
                 Toggle(isOn: $store.rescueStuckSessions) {
                     Text("Rescue sessions stuck on a spent limit")
-                    Text("Presses Esc in a session stuck over 10 minutes on an account that ran out, moves it to an account with room, and types continue.")
+                    Text("When a session has been stuck for 15 minutes on an account at 100% of a limit it needs, presses Esc, moves it to an account with room, and types continue. Never the tab you are using.")
                 }
                 Toggle(isOn: Binding(get: { store.opusFallback }, set: { value in Task { await store.setOpusFallback(value) } })) {
                     Text("Fall back to Opus when a model is unavailable")

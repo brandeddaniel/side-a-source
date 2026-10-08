@@ -143,9 +143,11 @@ import Testing
 
 @Test func sessionLooksStuckWhenWaitingOrBusyFarTooLong() {
     let now = 1_000_000.0
-    #expect(LiveSession(pid: 1, status: "waiting", statusSince: now - 5).looksStuck(now: now))
+    #expect(LiveSession(pid: 1, status: "waiting", statusSince: now - 700).looksStuck(now: now))
+    // Review: a fresh permission prompt is not stuck, and Esc would deny it.
+    #expect(!LiveSession(pid: 5, status: "waiting", statusSince: now - 5).looksStuck(now: now))
     #expect(LiveSession(pid: 2, status: "busy", statusSince: now - 3600).looksStuck(now: now))
-    #expect(!LiveSession(pid: 3, status: "busy", statusSince: now - 120).looksStuck(now: now))
+    #expect(!LiveSession(pid: 3, status: "busy", statusSince: now - 700).looksStuck(now: now))
     #expect(!LiveSession(pid: 4, status: "idle", statusSince: now - 9000).looksStuck(now: now))
 }
 
@@ -158,6 +160,10 @@ import Testing
     #expect(!Planner.isSpent(fableNear, onFable: true, now: now))
     let weeklySpent = AccountUsage(windows: [w("five_hour", 60), w("seven_day", 100), w("seven_day_model:fable", 28)])
     #expect(Planner.isSpent(weeklySpent, onFable: true, now: now) && Planner.isSpent(weeklySpent, onFable: false, now: now))
+    #expect(Planner.isExhausted(weeklySpent, onFable: false, now: now))
+    // 97-99% still works: never a reason to interrupt a turn.
+    let nearly = AccountUsage(windows: [w("five_hour", 98), w("seven_day", 50)])
+    #expect(Planner.isSpent(nearly, onFable: false, now: now) && !Planner.isExhausted(nearly, onFable: false, now: now))
     // A nearly spent account is never a new pick, though the active one may run on up to the limit.
     let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
     let roomy = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 95), w("seven_day_model:fable", 20)])

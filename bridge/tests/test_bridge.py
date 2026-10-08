@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -247,26 +248,48 @@ class BridgeTests(unittest.TestCase):
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
              patch.object(bridge,'read_secret',return_value={'claudeAiOauth':{}}), patch.object(bridge,'token_email',return_value='a@x'):
             self.assertEqual(bridge.live_sessions(self.root,{'accounts':[a,b]})[0]['accountID'],a['id'])
-    def test_sessions_are_found_by_title_or_lone_folder_and_never_guessed(self):
+    def test_sessions_are_found_by_title_or_tty_and_never_guessed(self):
         terms=[{'id':'T1','cwd':'/a','title':'Fix login'},{'id':'T2','cwd':'/a','title':'other'},{'id':'T3','cwd':'/b','title':'zsh'}]
         a1={'pid':1,'sessionId':'s1','cwd':'/a','name':'a-1'}; a2={'pid':2,'sessionId':'s2','cwd':'/a','name':'a-2'}
         b1={'pid':3,'sessionId':'s3','cwd':'/b','name':'b-1'}
         titles={'s1':{'a-1','Fix login'},'s2':{'a-2'},'s3':{'b-1'}}
         with patch.object(bridge,'session_titles',side_effect=lambda s: titles[s['sessionId']]):
             self.assertEqual(bridge.session_terminal(a1,[a1,a2,b1],terms)['id'],'T1')
-            self.assertEqual(bridge.session_terminal(b1,[a1,a2,b1],terms)['id'],'T3')
+            # A lone tab in the same folder is not enough: it may be a plain shell.
+            with patch.object(bridge,'terminal_by_tty',return_value=None):
+                with self.assertRaisesRegex(ValueError,'Ghostty tab'): bridge.session_terminal(b1,[a1,a2,b1],terms)
             # Two tabs in one folder and no title match: refuse rather than type into the wrong one.
             with patch.object(bridge,'terminal_by_tty',return_value=None):
                 with self.assertRaisesRegex(ValueError,'Ghostty tab'): bridge.session_terminal(a2,[a1,a2,b1],terms)
             with patch.object(bridge,'terminal_by_tty',return_value=terms[1]):
                 self.assertEqual(bridge.session_terminal(a2,[a1,a2,b1],terms)['id'],'T2')
     def test_resume_keeps_the_sessions_own_flags_and_replaces_conversation_and_model(self):
-        args='claude --dangerously-skip-permissions --resume old -c --model opus --permission-mode plan -n x --add-dir /tmp'
-        ps=subprocess.CompletedProcess([],0,args+'\n','')
-        with patch.object(bridge.subprocess,'run',return_value=ps):
-            self.assertEqual(bridge.resume_command(1,'S','fable','xhigh'),
-                ['claude','--resume','S','--dangerously-skip-permissions','--permission-mode','plan','--add-dir','/tmp','--model','fable','--effort','xhigh'])
-            self.assertEqual(bridge.resume_command(1,'S',None,'ultracode')[-1],'/tmp')
+        argv=['claude','--dangerously-skip-permissions','--resume','old','-c','--model','opus','--permission-mode','plan',
+              '-n','x','--add-dir','/tmp','/x y','--append-system-prompt','be brief please','--unknown','v']
+        self.assertEqual(bridge.resume_command(1,'S','claude-fable-5-1','xhigh',argv=argv),
+            ['claude','--resume','S','--dangerously-skip-permissions','--permission-mode','plan','--add-dir','/tmp','/x y',
+             '--append-system-prompt','be brief please','--model','fable','--effort','xhigh'])
+        self.assertEqual(bridge.resume_command(1,'S',None,'ultracode',argv=['claude'])[-1],'S')
+    def test_resume_never_resends_the_prompt_and_keeps_a_1m_model(self):
+        # Review: `claude "fix the tests"` resumed as `claude --resume S fix the tests`, and opus[1m] became opus.
+        argv=['claude','--model','opus[1m]','fix the tests']
+        self.assertEqual(bridge.resume_command(1,'S','claude-opus-5-5','high',argv=argv),
+                         ['claude','--resume','S','--model','opus[1m]','--effort','high'])
+        # A different model than the one launched with: the transcript's model wins.
+        self.assertEqual(bridge.resume_command(1,'S','claude-fable-5-1',None,argv=argv)[-2:],['--model','fable'])
+    def test_exact_argv_keeps_arguments_with_spaces(self):
+        command=[sys.executable,'-c','import time; time.sleep(30)','a b']
+        child=subprocess.Popen(command)
+        try:
+            time.sleep(0.3)
+            self.assertEqual(bridge.proc_argv(child.pid)[-2:],['import time; time.sleep(30)','a b'])
+        finally:
+            child.kill(); child.wait()
+    def test_a_half_written_session_file_is_skipped(self):
+        home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
+        (sessions/'1.json').write_text('{"pid": 1, "sess')
+        with patch.object(Path,'home',return_value=home):
+            self.assertEqual(bridge.live_sessions(self.root,{'accounts':[]}),[])
     def test_side_a_waits_for_claude_codes_refresh_lock_and_releases_it(self):
         # From upstream 0.5.16: a run refreshing at the same moment as an open session can get a login revoked.
         lock=self.root/'claude-home/.oauth_refresh.lock'; lock.mkdir(parents=True)

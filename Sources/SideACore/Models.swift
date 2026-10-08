@@ -110,10 +110,12 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     public init(pid: Int, name: String? = nil, status: String? = nil, statusSince: Double? = nil, model: String? = nil, accountID: String? = nil) {
         self.pid = pid; self.name = name; self.status = status; self.statusSince = statusSince; self.model = model; self.accountID = accountID
     }
-    /// Waiting on the user, or "busy" far longer than a turn takes: on an account with no Fable
-    /// left, that is Claude Code's Fable-limit prompt or a turn stuck retrying the limit.
+    /// Waiting on the user for 10 minutes, or "busy" for 15: on an account that is out of a limit
+    /// the session needs, that is Claude Code's limit prompt or a turn stuck retrying the limit.
+    /// A short wait is a normal permission prompt; a long busy turn on a working account is work.
     public func looksStuck(now: Double) -> Bool {
-        status == "waiting" || (status == "busy" && now - (statusSince ?? now) > 600)
+        let elapsed = now - (statusSince ?? now)
+        return (status == "waiting" && elapsed > 600) || (status == "busy" && elapsed > 900)
     }
 }
 
@@ -216,6 +218,13 @@ public enum Planner {
     public static func shouldLeave(_ usage: AccountUsage, onFable: Bool, now: Double) -> Bool {
         let limits = [usage.fiveHour, usage.weekly] + (onFable ? [usage.fable] : [])
         return limits.contains { (live($0, now)?.percent ?? 0) >= switchTarget }
+    }
+
+    /// A session on this account cannot make requests at all: a limit it needs is at 100%.
+    /// Between 97% and 100% it still works, so only this justifies interrupting a turn.
+    public static func isExhausted(_ usage: AccountUsage, onFable: Bool, now: Double) -> Bool {
+        let limits = [usage.fiveHour, usage.weekly] + (onFable ? [usage.fable] : [])
+        return limits.contains { (live($0, now)?.percent ?? 0) >= 100 }
     }
 
     /// A session on this account cannot run: a limit it depends on is spent.
