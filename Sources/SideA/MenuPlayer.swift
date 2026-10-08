@@ -211,7 +211,7 @@ struct FableSessions: View {
                             .foregroundStyle(store.isStuck(session) ? Color.orange : Color.primary)
                         Spacer(minLength: 4)
                         Text(account?.name ?? "Unknown account").foregroundStyle(.secondary).lineLimit(1)
-                        if store.isStuck(session) {
+                        if store.isStuck(session) && session.inTerminal {
                             Button("Show") { Task { await store.act(on: session.pid, .focus) } }
                                 .controlSize(.mini).help("Bring this session's Ghostty tab to the front; it needs your answer")
                         } else if spent {
@@ -222,6 +222,8 @@ struct FableSessions: View {
                         }
                         if store.actingOn.contains(session.pid) {
                             ProgressView().controlSize(.mini)
+                        } else if !session.inTerminal {
+                            Image(systemName: "gearshape.2").foregroundStyle(.secondary).help("Headless job (claude -p); it has no tab to switch")
                         } else {
                             Menu {
                                 Button("Switch to Opus") { Task { await store.act(on: session.pid, .opus) } }

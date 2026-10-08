@@ -550,7 +550,7 @@ final class AccountStore {
     }
     private func rescueStuck(now: Double) async {
         guard rescueStuckSessions else { return }
-        for session in sessions where session.looksStuck(now: now)
+        for session in sessions where session.inTerminal && session.looksStuck(now: now)
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.isSpent(value, onFable: session.onFable, now: now),
@@ -572,7 +572,7 @@ final class AccountStore {
     private func fixSessions(fableSpentEverywhere: Bool) async {
         guard fixFableSessions else { return }
         let now = Date().timeIntervalSince1970
-        for session in sessions where session.status == "idle"
+        for session in sessions where session.inTerminal && session.status == "idle"
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }

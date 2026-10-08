@@ -99,6 +99,10 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     public var status: String?
     /// When the status last changed, in seconds since 1970.
     public var statusSince: Double?
+    /// "cli" for a session in a terminal; "sdk-cli" for a headless `claude -p` job, which has no tab.
+    public var entrypoint: String?
+    /// Side A can type into it: it runs in a terminal tab.
+    public var inTerminal: Bool { entrypoint == nil || entrypoint == "cli" }
     public var model: String?
     public var accountID: String?
     public var id: Int { pid }

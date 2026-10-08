@@ -235,8 +235,8 @@ class BridgeTests(unittest.TestCase):
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
              patch.object(bridge,'mac_email',return_value='a@x'), patch.object(bridge,'read_secret',return_value=None):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
-        self.assertEqual(result,[{'pid':101,'name':'n101','status':'busy','statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
-                                 {'pid':102,'name':'n102','status':'busy','statusSince':None,'model':None,'accountID':a['id']}])
+        self.assertEqual(result,[{'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
+                                 {'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
     def test_a_session_is_attributed_to_whoever_its_slot_login_belongs_to(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}
@@ -256,7 +256,10 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.session_terminal(a1,[a1,a2,b1],terms)['id'],'T1')
             self.assertEqual(bridge.session_terminal(b1,[a1,a2,b1],terms)['id'],'T3')
             # Two tabs in one folder and no title match: refuse rather than type into the wrong one.
-            with self.assertRaisesRegex(ValueError,'Ghostty tab'): bridge.session_terminal(a2,[a1,a2,b1],terms)
+            with patch.object(bridge,'terminal_by_tty',return_value=None):
+                with self.assertRaisesRegex(ValueError,'Ghostty tab'): bridge.session_terminal(a2,[a1,a2,b1],terms)
+            with patch.object(bridge,'terminal_by_tty',return_value=terms[1]):
+                self.assertEqual(bridge.session_terminal(a2,[a1,a2,b1],terms)['id'],'T2')
     def test_resume_keeps_the_sessions_own_flags_and_replaces_conversation_and_model(self):
         args='claude --dangerously-skip-permissions --resume old -c --model opus --permission-mode plan -n x --add-dir /tmp'
         ps=subprocess.CompletedProcess([],0,args+'\n','')

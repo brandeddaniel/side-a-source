@@ -766,7 +766,7 @@ def live_sessions(root, config):
                     mac = ""
             account = mac or None
         since = data.get("statusUpdatedAt")
-        sessions.append({"pid": pid, "name": data.get("name"), "status": data.get("status"),
+        sessions.append({"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
                          "statusSince": since / 1000 if isinstance(since, (int, float)) else None,
                          "model": session_model(data["sessionId"]), "accountID": account})
     return sorted(sessions, key=lambda item: item["pid"])
@@ -823,7 +823,7 @@ def ghostty_terminals():
         parts = line.split("\t", 2)
         if len(parts) == 3:
             # Claude Code prefixes its title with a status glyph (e.g. "✳ name").
-            terminals.append({"id": parts[0], "cwd": parts[1], "title": re.sub(r"^\W+\s", "", parts[2]).strip()})
+            terminals.append({"id": parts[0], "cwd": parts[1], "title": re.sub(r"^\W+\s", "", parts[2]).strip(), "raw": parts[2]})
     return terminals
 
 
@@ -850,7 +850,35 @@ def session_terminal(session, records, terminals):
         return named[0]
     if len(same_folder) == 1 and sum(r.get("cwd") == session.get("cwd") for r in records) == 1:
         return same_folder[0]
+    marked = terminal_by_tty(session.get("pid"))
+    if marked:
+        return marked
     raise ValueError("Couldn't find this session's Ghostty tab.")
+
+
+def terminal_by_tty(pid):
+    """The Ghostty terminal showing this process's tty, when titles can't tell: a unique title is
+    written to the tty, the terminal showing it is found, and its previous title is put back."""
+    if not isinstance(pid, int):
+        return None
+    tty = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r"ttys\d+", tty):
+        return None
+    before = {t["id"]: t for t in ghostty_terminals()}
+    mark = f"side-a-{uuid.uuid4().hex[:12]}"
+    try:
+        with open(f"/dev/{tty}", "w") as stream:
+            stream.write(f"\033]2;{mark}\007")
+    except OSError:
+        return None
+    time.sleep(0.3)
+    found = next((t for t in ghostty_terminals() if t["title"] == mark), None)
+    if found and found["id"] in before:
+        raw = before[found["id"]]["raw"]
+        with contextlib.suppress(OSError), open(f"/dev/{tty}", "w") as stream:
+            stream.write(f"\033]2;{raw}\007")
+        return before[found["id"]]
+    return found
 
 
 # Flags that pick the conversation or model are replaced; everything else the session started with is kept.
