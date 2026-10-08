@@ -141,6 +141,7 @@ final class AccountStore {
             backoffUntil = cache.backoff ?? [:]; primedAt = cache.primed ?? [:]; failing = Set(cache.failing ?? [])
             // Counted from now: one old failure must not move the Mac off its account at launch.
             for id in failing { failingSince[id] = Date() }
+            readAt = cache.readAt ?? [:]
             activeIDs = (cache.active ?? [:]).reduce(into: [:]) { ids, item in AgentProvider(rawValue: item.key).map { ids[$0] = item.value } }
         }
         if !isDemo {
@@ -185,9 +186,15 @@ final class AccountStore {
         if let data = try? await bridgeOutput(["fallback", "status"]) { opusFallback = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
     }
     /// Reads accounts side by side; each Codex read starts its own app-server, so serial reads add up.
+    /// Three at a time: a burst of reads (every account at launch) gets the usage endpoint to
+    /// answer 429 for nearly all of them.
     private func refresh(_ ids: [String]) async {
         await withTaskGroup(of: Void.self) { group in
-            for id in ids { group.addTask { await self.refreshUsage(id) } }
+            var pending = ids[...]
+            for _ in 0..<3 { if let id = pending.popFirst() { group.addTask { await self.refreshUsage(id) } } }
+            while await group.next() != nil {
+                if let id = pending.popFirst() { group.addTask { await self.refreshUsage(id) } }
+            }
         }
     }
     var configURL: URL { root.appendingPathComponent("config.json") }
@@ -422,7 +429,8 @@ final class AccountStore {
     /// What Autopilot may act on: accounts with a trustworthy latest reading, plus any account a
     /// running session just hit a limit on (its own error is proof, even while reads are failing).
     private var plannable: [String: AccountUsage] {
-        var value = usage.filter { !failing.contains($0.key) }
+        // A failed read keeps its last good reading for 30 minutes; a 429 says nothing about the limits.
+        var value = usage.filter { !failing.contains($0.key) || Date().timeIntervalSince(readAt[$0.key] ?? .distantPast) < 1800 }
         for (id, evidence) in limitEvidence { value[id] = evidence }
         return value
     }
@@ -442,13 +450,14 @@ final class AccountStore {
         var backoff: [String: Date]?; var primed: [String: Date]?
         var active: [String: String]?; var failing: [String]?
         var modelLimits: Bool?
+        var readAt: [String: Date]?
     }
     private var reportURL: URL { root.appendingPathComponent("runtime/report.json") }
     private var usageCacheURL: URL { root.appendingPathComponent("runtime/usage-cache.json") }
     private func saveUsageCache() {
         try? PrivateFile.write(UsageCache(usage: usage, at: usageAt, backoff: backoffUntil, primed: primedAt,
                                           active: Dictionary(uniqueKeysWithValues: activeIDs.map { ($0.key.rawValue, $0.value) }),
-                                          failing: Array(failing), modelLimits: true),
+                                          failing: Array(failing), modelLimits: true, readAt: readAt),
                                to: usageCacheURL)
     }
     /// Active accounts change fastest, then accounts running sessions (a session keeps the account it
@@ -686,7 +695,16 @@ final class AccountStore {
         for provider in [AgentProvider.claude] where unknownLogins[provider] == nil && shellSwitching {
             let accounts = config.accounts.filter { $0.provider == provider }
             let current = activeIDs[provider]
-            let pick = Planner.pick(accounts, usage: plannable, active: current, now: now)
+            var pick = Planner.pick(accounts, usage: plannable, active: current, now: now)
+            // Fable counts as spent everywhere only when every account's Fable is known to be spent;
+            // an account Side A can't read right now may well have Fable left.
+            let fableMaybeLeft = accounts.contains { account in
+                account.ready && account.allowAuto
+                    && !(plannable[account.id].map { Planner.isSpent($0, onFable: false, now: now) } ?? false)
+                    && (usage[account.id]?.fable.map { $0.percent < Planner.full || ($0.resetsAt ?? 0) <= now } ?? true)
+                    && plannable[account.id]?.fable.map({ $0.percent < Planner.full || ($0.resetsAt ?? 0) <= now }) != false
+            }
+            if pick.fableSpent && fableMaybeLeft { pick = (nil, false) }
             await setFableToOpus(pick.fableSpent)
             // A failed read is not evidence of a limit; only a signed-out active account moves.
             if let current, failing.contains(current), usage[current]?.stale != true,
