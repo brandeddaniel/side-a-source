@@ -45,6 +45,8 @@ final class AccountStore {
     }
     @ObservationIgnored private var fixedAt: [Int: Date] = [:]
     @ObservationIgnored private var switchedToOpus: Set<Int> = []
+    /// Limit hits already reported because Side A could not move the session itself.
+    @ObservationIgnored private var limitReported: [Int: Double] = [:]
     /// Fable sessions already reported as stuck, until they move on.
     @ObservationIgnored private var stuckNotified: Set<Int> = []
     @ObservationIgnored private var reportAt = Date.distantPast
@@ -579,6 +581,17 @@ final class AccountStore {
         return target
     }
     private func rescueStuck(now: Double) async {
+        // A limit hit Side A won't act on (a shell command may be running, or there is no tab): say so once.
+        for session in sessions where session.limitHit != nil && (session.status == "shell" || !session.inTerminal) {
+            guard let at = session.limitAt, now - at < 1800, (limitReported[session.pid] ?? 0) < at - 3600 || limitReported[session.pid] == nil
+            else { continue }
+            limitReported[session.pid] = at
+            let account = config.accounts.first { $0.id == session.accountID }?.name ?? "its account"
+            notify("\(session.name ?? "A session") hit its \(session.limitHit ?? "") limit",
+                   session.inTerminal
+                       ? "It's on \(account) and has a shell command running, so Side A won't exit it. When the command is done, /exit and run claude -c in its tab to continue on an account with room."
+                       : "It's a headless job on \(account); it can't be moved. It will stop until the limit resets.")
+        }
         guard rescueStuckSessions else { return }
         for session in sessions where session.inTerminal && (session.limitHit != nil || session.looksStuck(now: now))
             && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
