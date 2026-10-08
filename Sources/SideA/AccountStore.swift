@@ -61,6 +61,7 @@ final class AccountStore {
     @ObservationIgnored private var failingSince: [String: Date] = [:]
     /// When each account was last read successfully; `usageAt` is the last attempt.
     @ObservationIgnored private var readAt: [String: Date] = [:]
+    @ObservationIgnored private var loginStamps: [String: Double] = [:]
     /// Accounts already reported as having their login replaced, until they read again.
     @ObservationIgnored private var replacedNotified: Set<String> = []
     func readsFailing(_ id: String) -> Bool { failing.contains(id) }
@@ -468,10 +469,18 @@ final class AccountStore {
     }
     @discardableResult private func refreshActive() async -> Bool {
         let generation = selectionGeneration
-        struct Active: Decodable { let accountID: String?; let email: String; let codexAccountID: String?; let codexEmail: String }
+        struct Active: Decodable { let accountID: String?; let email: String; let codexAccountID: String?; let codexEmail: String; let logins: [String: Double]? }
         guard let data = try? await bridgeOutput(["active"]), let value = try? JSONDecoder().decode(Active.self, from: data) else { return false }
         guard generation == selectionGeneration else { return false }
         activeIDs = [.claude: value.accountID, .codex: value.codexAccountID].compactMapValues { $0 }
+        // From upstream 0.5.16: a login that changed (signed in again, or refreshed by Claude Code)
+        // is read now; the back-off and any old failure belonged to the previous login.
+        for (id, stamp) in value.logins ?? [:] {
+            if let seen = loginStamps[id], seen != stamp {
+                backoffUntil[id] = nil; usageAt[id] = nil; failing.remove(id); failingSince[id] = nil
+            }
+            loginStamps[id] = stamp
+        }
         unknownLogins = [.claude: value.accountID == nil ? value.email : "", .codex: value.codexAccountID == nil ? value.codexEmail : ""]
             .filter { !$0.value.isEmpty }
         return true

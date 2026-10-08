@@ -264,6 +264,17 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.resume_command(1,'S','fable','xhigh'),
                 ['claude','--resume','S','--dangerously-skip-permissions','--permission-mode','plan','--add-dir','/tmp','--model','fable','--effort','xhigh'])
             self.assertEqual(bridge.resume_command(1,'S',None,'ultracode')[-1],'/tmp')
+    def test_side_a_waits_for_claude_codes_refresh_lock_and_releases_it(self):
+        # From upstream 0.5.16: a run refreshing at the same moment as an open session can get a login revoked.
+        lock=self.root/'claude-home/.oauth_refresh.lock'; lock.mkdir(parents=True)
+        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':str(self.root/'claude-home')}):
+            with self.assertRaisesRegex(ValueError,'refreshing a login'):
+                with bridge.claude_refresh_lock(timeout=1): pass
+            self.assertTrue(lock.exists())  # someone else's live lock is left alone
+            old=time.time()-120; os.utime(lock,(old,old))
+            with bridge.claude_refresh_lock(timeout=1):
+                self.assertTrue(lock.exists())  # a stale lock is taken over, and held while claude runs
+            self.assertFalse(lock.exists())
     def test_report_counts_each_response_once_per_day_and_project(self):
         folder=Path(self.temp.name)/'home/.claude/projects/p'; folder.mkdir(parents=True)
         line=lambda mid,ts,out:json.dumps({'timestamp':ts,'cwd':'/work/app','requestId':'r'+mid,'message':{'id':mid,'model':'m','usage':{'input_tokens':1,'output_tokens':out}}})

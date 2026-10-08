@@ -11,6 +11,7 @@ Tokens are never logged or printed.
 from __future__ import annotations
 import argparse
 import contextlib
+import contextlib
 import datetime
 import fcntl
 import functools
@@ -23,6 +24,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -456,18 +458,74 @@ def shell_installed(root):
     return SHELL_MARK in text
 
 
+# From upstream Side A 0.5.16.
+@contextlib.contextmanager
+def claude_refresh_lock(timeout=30):
+    """Holds Claude Code's own refresh lock while Side A runs claude for an account. Claude Code
+    lets one process refresh a login at a time through this lock, in its config folder; a profile
+    run uses another folder, so without it Side A could refresh a login at the same moment as an
+    open session, and the server revokes a login whose refresh token is used twice.
+    Same format as Claude Code's lock library: a directory, stale after 60 s without an update."""
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".oauth_refresh.lock"
+    deadline = time.time() + timeout
+    while True:
+        try:
+            path.mkdir()
+            break
+        except FileExistsError:
+            try:
+                if time.time() - path.stat().st_mtime > 60:
+                    path.rmdir()
+                    continue
+            except OSError:
+                pass
+            if time.time() > deadline:
+                raise ValueError("Claude Code is refreshing a login right now; Side A will try again shortly.")
+            time.sleep(0.5)
+        except FileNotFoundError:
+            path.parent.mkdir(parents=True, exist_ok=True)
+    stop = threading.Event()
+    def keep_fresh():
+        while not stop.wait(5):
+            with contextlib.suppress(OSError):
+                os.utime(path)
+    threading.Thread(target=keep_fresh, daemon=True).start()
+    try:
+        yield
+    finally:
+        stop.set()
+        with contextlib.suppress(OSError):
+            path.rmdir()
+
+
+def run_as(root, account, args, timeout):
+    """Runs claude as the account's own login with clean settings, under the shared refresh lock."""
+    env = clean_environment(prepare_profile(root, account["id"]))
+    # The profile's clean settings keep the user's hooks and CLAUDE.md out; the selector
+    # picks the account's own login, which the CLI refreshes itself if needed.
+    env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = selector_for(root, account)
+    with claude_refresh_lock():
+        return subprocess.run([claude_binary(), *args], env=env, cwd=root, capture_output=True,
+                              text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+def login_stamps(root, config):
+    """When each Claude account's stored login expires. A new value means a sign-in or refresh
+    happened, so the app re-reads that account at once instead of waiting out a back-off."""
+    stamps = {}
+    for account in config.get("accounts", []):
+        if provider_of(account) == "claude" and account.get("ready"):
+            stamps[account["id"]] = ((read_secret(home_service(root, account)) or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
+    return stamps
+
+
 def prime(root, config, account):
     """Send one tiny message so the account's 5-hour window starts now instead of at first real use."""
     if provider_of(account) == "codex":
         from codex_bridge import prime as codex_prime
         return codex_prime(root, account)
     owned_login(root, account)
-    env = clean_environment(prepare_profile(root, account["id"]))
-    # The profile's clean settings keep the user's hooks and CLAUDE.md out; the selector
-    # picks the account's own login, which the CLI refreshes itself if needed.
-    env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = selector_for(root, account)
-    result = subprocess.run([claude_binary(), "-p", "Reply with OK.", "--model", "haiku", "--max-turns", "1"],
-                            env=env, cwd=root, capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
+    result = run_as(root, account, ["-p", "Reply with OK.", "--model", "haiku", "--max-turns", "1"], 120)
     if result.returncode != 0:
         raise ValueError(f"{account['name']} could not start its 5-hour window.")
 
@@ -737,6 +795,10 @@ GHOSTTY_ESCAPE = """on run argv
     tell application "Ghostty" to send key "escape" to (first terminal whose id is (item 1 of argv))
 end run"""
 
+GHOSTTY_KEY = """on run argv
+    tell application "Ghostty" to send key (item 2 of argv) to (first terminal whose id is (item 1 of argv))
+end run"""
+
 GHOSTTY_TYPE = """on run argv
     tell application "Ghostty"
         set t to first terminal whose id is (item 1 of argv)
@@ -835,6 +897,12 @@ def live_session_for(session_id, other_than):
     return None
 
 
+def resuming(session_id):
+    """Whether a claude process resuming this conversation is running."""
+    result = subprocess.run(["ps", "-axww", "-o", "args="], capture_output=True, text=True)
+    return any("--resume" in line and session_id in line for line in result.stdout.splitlines())
+
+
 def wait_for(check, seconds, step=0.5):
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -891,7 +959,13 @@ def session_action(root, pid, action):
         raise ValueError("The session did not exit; nothing else was typed.")
     resume = prefix + " ".join(shlex.quote(part) for part in command)
     osascript(GHOSTTY_TYPE, terminal["id"], resume)
-    # Confirm it came back; a resume can stop at a startup question, or fail to start at all.
+    # Confirm it came back. A long conversation first asks whether to resume from a summary or in
+    # full; the user's choice is the full session (second option). Only answered while a claude
+    # process resuming this conversation is running and has not started yet.
+    if not wait_for(lambda: live_session_for(session["sessionId"], pid), 10) and resuming(session["sessionId"]):
+        osascript(GHOSTTY_KEY, terminal["id"], "arrowDown")  # Ghostty's key name for the down arrow
+        time.sleep(0.3)
+        osascript(GHOSTTY_KEY, terminal["id"], "enter")
     if not wait_for(lambda: live_session_for(session["sessionId"], pid), 45):
         raise ValueError(f"{session.get('name') or 'The session'} did not restart; it may be asking a question in its tab. To restart it yourself: {resume}")
 
@@ -961,7 +1035,8 @@ def main():
         print(json.dumps({"accountID": (repair_selection(root, config) or {}).get("id"),
                           "email": "" if account_for_email(config, mac) else mac,
                           "codexAccountID": (codex_bridge.global_account(config) or {}).get("id"),
-                          "codexEmail": codex_bridge.global_email()}))
+                          "codexEmail": codex_bridge.global_email(),
+                          "logins": login_stamps(root, config)}))
         return
     account = account_by_id(config, args.account)
     if args.command == "usage":
