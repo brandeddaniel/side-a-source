@@ -677,6 +677,7 @@ def live_sessions(root, config):
     the profile in its environment, or the Mac login when it has none."""
     ids = {account["id"] for account in config.get("accounts", [])}
     mac = None
+    owners = {}
     sessions = []
     for path in (Path.home() / ".claude" / "sessions").glob("*.json"):
         data = read_json(path, None)
@@ -688,7 +689,17 @@ def live_sessions(root, config):
             continue  # not running any more
         match = PROFILE_IN_ENV.search(result.stdout)
         if match:
-            account = match.group(2) if match.group(2) in ids else None
+            # The slot's login decides the account: `/login` inside a session replaces the login in
+            # the slot it started on, so the slot's own account can be the wrong answer.
+            slot = match.group(2)
+            if slot not in owners:
+                try:
+                    email = token_email(root, read_secret(profile_service(root, slot)))
+                except (ValueError, OSError):
+                    email = ""
+                owned = (account_for_email(config, email) or {}).get("id") if email else None
+                owners[slot] = owned or (slot if slot in ids and not email else None)
+            account = owners[slot]
         else:
             if mac is None:
                 try:
@@ -720,6 +731,10 @@ GHOSTTY_FOCUS = """on run argv
         activate
         focus (first terminal whose id is (item 1 of argv))
     end tell
+end run"""
+
+GHOSTTY_ESCAPE = """on run argv
+    tell application "Ghostty" to send key "escape" to (first terminal whose id is (item 1 of argv))
 end run"""
 
 GHOSTTY_TYPE = """on run argv
@@ -805,10 +820,48 @@ def resume_command(pid, session_id, model, effort=None):
             *(["--effort", effort] if effort in EFFORTS else [])]
 
 
+def live_session_for(session_id, other_than):
+    """A running session record for this conversation, other than the given pid."""
+    for path in (Path.home() / ".claude" / "sessions").glob("*.json"):
+        data = read_json(path, None)
+        if isinstance(data, dict) and data.get("sessionId") == session_id and data.get("pid") != other_than:
+            try:
+                os.kill(data["pid"], 0)
+                return data
+            except (ProcessLookupError, TypeError):
+                continue
+            except PermissionError:
+                return data
+    return None
+
+
+def wait_for(check, seconds, step=0.5):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        value = check()
+        if value:
+            return value
+        time.sleep(step)
+    return None
+
+
 def session_action(root, pid, action):
     """Switches a running session to Opus (`/model opus`), or moves it to the account new commands
-    use now: `/exit`, then resume the same conversation in the same tab."""
+    use now: `/exit`, then resume the same conversation in the same tab. `rescue` first presses Esc
+    to end a turn stuck on a spent limit, and afterwards types `continue` so the work carries on."""
     session = session_record(pid)
+    if action == "rescue":
+        records = [r for r in (read_json(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
+        terminal = session_terminal(session, records, ghostty_terminals())
+        osascript(GHOSTTY_ESCAPE, terminal["id"])
+        idle = lambda: (read_json(Path.home() / ".claude" / "sessions" / f"{pid}.json", {}) or {}).get("status") == "idle"
+        if not wait_for(idle, 30):
+            raise ValueError("Esc did not end the stuck turn; nothing else was typed.")
+        session_action(root, pid, "move")
+        resumed = wait_for(lambda: live_session_for(session["sessionId"], pid), 5)
+        if resumed and wait_for(lambda: (read_json(Path.home() / ".claude" / "sessions" / f"{resumed['pid']}.json", {}) or {}).get("status") == "idle", 60):
+            osascript(GHOSTTY_TYPE, terminal["id"], "continue")
+        return
     records = [r for r in (read_json(p, None) for p in (Path.home() / ".claude" / "sessions").glob("*.json")) if isinstance(r, dict)]
     terminal = session_terminal(session, records, ghostty_terminals())
     if action == "focus":
@@ -836,7 +889,11 @@ def session_action(root, pid, action):
         time.sleep(0.3)
     else:
         raise ValueError("The session did not exit; nothing else was typed.")
-    osascript(GHOSTTY_TYPE, terminal["id"], prefix + " ".join(shlex.quote(part) for part in command))
+    resume = prefix + " ".join(shlex.quote(part) for part in command)
+    osascript(GHOSTTY_TYPE, terminal["id"], resume)
+    # Confirm it came back; a resume can stop at a startup question, or fail to start at all.
+    if not wait_for(lambda: live_session_for(session["sessionId"], pid), 45):
+        raise ValueError(f"{session.get('name') or 'The session'} did not restart; it may be asking a question in its tab. To restart it yourself: {resume}")
 
 
 def limit_hook_installed():
@@ -864,7 +921,7 @@ def main():
     commands.add_parser("sessions")
     action = commands.add_parser("session")
     action.add_argument("pid", type=int)
-    action.add_argument("action", choices=["opus", "move", "focus"])
+    action.add_argument("action", choices=["opus", "move", "focus", "rescue"])
     args = parser.parse_args()
     root = args.root.expanduser().resolve()
     os.umask(0o077)

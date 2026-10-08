@@ -206,6 +206,10 @@ struct AutopilotSettings: View {
                     Text("Move running sessions before a limit")
                     Text("Between turns, when a session's account reaches 90% of a limit it needs, types into its Ghostty tab to move it to an account with room, or switches a Fable session to Opus.")
                 }
+                Toggle(isOn: $store.rescueStuckSessions) {
+                    Text("Rescue sessions stuck on a spent limit")
+                    Text("Presses Esc in a session stuck over 10 minutes on an account that ran out, moves it to an account with room, and types continue.")
+                }
                 Toggle(isOn: Binding(get: { store.opusFallback }, set: { value in Task { await store.setOpusFallback(value) } })) {
                     Text("Fall back to Opus when a model is unavailable")
                     Text("Sets fallbackModel in Claude Code settings. Claude Code decides when it applies.")

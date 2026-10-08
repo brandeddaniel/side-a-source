@@ -233,10 +233,20 @@ class BridgeTests(unittest.TestCase):
         def ps(command,**_):
             pid=int(command[-1]); return subprocess.CompletedProcess(command,0 if pid in envs else 1,envs.get(pid,''),'')
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
-             patch.object(bridge,'mac_email',return_value='a@x'):
+             patch.object(bridge,'mac_email',return_value='a@x'), patch.object(bridge,'read_secret',return_value=None):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
         self.assertEqual(result,[{'pid':101,'name':'n101','status':'busy','statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
                                  {'pid':102,'name':'n102','status':'busy','statusSince':None,'model':None,'accountID':a['id']}])
+    def test_a_session_is_attributed_to_whoever_its_slot_login_belongs_to(self):
+        home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
+        a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}
+        bridge.atomic_json(sessions/'101.json',{'pid':101,'sessionId':'s1','cwd':'/w'})
+        env=f"claude CLAUDE_SECURESTORAGE_CONFIG_DIR={self.root}/profiles/{b['id']}"
+        ps=lambda command,**_: subprocess.CompletedProcess(command,0,env,'')
+        # `/login` as A inside a session on B's slot left A's login there.
+        with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
+             patch.object(bridge,'read_secret',return_value={'claudeAiOauth':{}}), patch.object(bridge,'token_email',return_value='a@x'):
+            self.assertEqual(bridge.live_sessions(self.root,{'accounts':[a,b]})[0]['accountID'],a['id'])
     def test_sessions_are_found_by_title_or_lone_folder_and_never_guessed(self):
         terms=[{'id':'T1','cwd':'/a','title':'Fix login'},{'id':'T2','cwd':'/a','title':'other'},{'id':'T3','cwd':'/b','title':'zsh'}]
         a1={'pid':1,'sessionId':'s1','cwd':'/a','name':'a-1'}; a2={'pid':2,'sessionId':'s2','cwd':'/a','name':'a-2'}
