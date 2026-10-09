@@ -404,6 +404,10 @@ final class AccountStore {
             // Idle: nobody has used the login since it expired, so the last reading still holds.
             if message.contains("idle") {
                 backoffUntil[id] = Date().addingTimeInterval(1800)
+                // Nobody has used the login since it expired, so its usage can't have grown: the last
+                // reading is current. Without this an unused account, the best place to move a session,
+                // looked stale and was never used as a target.
+                if usage[id] != nil { readAt[id] = Date() }
             } else {
                 // The usage endpoint rate-limits frequent reads; back off rather than retry.
                 let signIn = message.contains("Sign in")
