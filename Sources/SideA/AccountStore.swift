@@ -67,6 +67,9 @@ final class AccountStore {
     /// When each account was last read successfully; `usageAt` is the last attempt.
     @ObservationIgnored private var readAt: [String: Date] = [:]
     @ObservationIgnored private var loginStamps: [String: Double] = [:]
+    /// Accounts whose login nobody has used since it expired: their last reading stays current
+    /// until someone uses them (a read then succeeds or fails and clears this).
+    @ObservationIgnored private var idle: Set<String> = []
     /// Accounts already reported as having their login replaced, until they read again.
     @ObservationIgnored private var replacedNotified: Set<String> = []
     func readsFailing(_ id: String) -> Bool { failing.contains(id) }
@@ -391,7 +394,7 @@ final class AccountStore {
         do {
             let value = try JSONDecoder().decode(AccountUsage.self, from: try await bridgeOutput(["usage", id]))
             usage[id] = value
-            failing.remove(id); failingSince[id] = nil; readAt[id] = Date(); replacedNotified.remove(id)
+            failing.remove(id); failingSince[id] = nil; readAt[id] = Date(); replacedNotified.remove(id); idle.remove(id)
             let now = Date().timeIntervalSince1970
             if let five = value.fiveHour {
                 // A drop means the window reset; the old pace no longer applies.
@@ -407,12 +410,12 @@ final class AccountStore {
                 // Nobody has used the login since it expired, so its usage can't have grown: the last
                 // reading is current. Without this an unused account, the best place to move a session,
                 // looked stale and was never used as a target.
-                if usage[id] != nil { readAt[id] = Date() }
+                if usage[id] != nil { readAt[id] = Date(); idle.insert(id) }
             } else {
                 // The usage endpoint rate-limits frequent reads; back off rather than retry.
                 let signIn = message.contains("Sign in")
                 backoffUntil[id] = Date().addingTimeInterval(signIn ? 1800 : message.contains("429") ? 600 : 300)
-                failing.insert(id)
+                failing.insert(id); idle.remove(id)
                 if failingSince[id] == nil { failingSince[id] = Date() }
                 if signIn { usage[id]?.stale = true }
                 if message.contains("belongs to another account"), !replacedNotified.contains(id),
@@ -577,6 +580,8 @@ final class AccountStore {
     /// A reading Autopilot may act on: read in the last 10 minutes and not failing.
     private func trusted(_ id: String) -> AccountUsage? {
         if let evidence = limitEvidence[id] { return evidence }
+        // An idle account can't have used anything since its last reading, however long ago that was.
+        if idle.contains(id), !failing.contains(id), !sessions.contains(where: { $0.accountID == id }) { return usage[id] }
         guard !failing.contains(id), Date().timeIntervalSince(readAt[id] ?? .distantPast) < 600 else { return nil }
         return usage[id]
     }
