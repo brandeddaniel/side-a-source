@@ -1104,7 +1104,12 @@ def session_action(root, pid, action, automatic=False):
     resume = prefix + " ".join(shlex.quote(part) for part in command)
     osascript(GHOSTTY_TYPE, terminal["id"], "/exit")
     if not wait_for(lambda: not process_alive(pid), 20, 0.3):
-        raise ValueError("The session did not exit; nothing else was typed.")
+        # Claude Code asks to confirm /exit while background work runs (agents, monitors): decline it,
+        # so no prompt is left open in the user's tab, and leave the session as it was.
+        with contextlib.suppress(ValueError):
+            osascript(GHOSTTY_ESCAPE, terminal["id"])
+        raise ValueError("It has background work running (Claude Code asked to confirm /exit, which Side A declined); "
+                         "use /login in its tab to switch its account without restarting.")
     # From here the session has exited: every failure says how to bring it back.
     name = session.get("name") or "The session"
     try:

@@ -70,6 +70,8 @@ final class AccountStore {
     /// Accounts whose login nobody has used since it expired: their last reading stays current
     /// until someone uses them (a read then succeeds or fails and clears this).
     @ObservationIgnored private var idle: Set<String> = []
+    /// Sessions that turned out to have background work /exit would end: never restarted again.
+    @ObservationIgnored private var cannotRestart: Set<Int> = []
     /// Accounts already reported as having their login replaced, until they read again.
     @ObservationIgnored private var replacedNotified: Set<String> = []
     func readsFailing(_ id: String) -> Bool { failing.contains(id) }
@@ -593,7 +595,7 @@ final class AccountStore {
     }
     private func rescueStuck(now: Double) async {
         // A limit hit Side A won't act on (a shell command may be running, or there is no tab): say so once.
-        for session in sessions where session.limitHit != nil && (session.status == "shell" || !session.restartable) {
+        for session in sessions where session.limitHit != nil && (session.status == "shell" || !session.restartable || cannotRestart.contains(session.pid)) {
             guard let at = session.limitAt, now - at < 1800, (limitReported[session.pid] ?? 0) < at - 3600 || limitReported[session.pid] == nil
             else { continue }
             limitReported[session.pid] = at
@@ -606,7 +608,7 @@ final class AccountStore {
         guard rescueStuckSessions else { return }
         // Any limit error qualifies here: the account must also read as exhausted below, so an old error
         // on an account with room does nothing, and a fresh reading that confirms it doesn't delay it.
-        for session in sessions where session.restartable && (session.limitHit != nil || session.looksStuck(now: now))
+        for session in sessions where session.restartable && !cannotRestart.contains(session.pid) && (session.limitHit != nil || session.looksStuck(now: now))
             && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.isExhausted(value, onFable: session.onFable, now: now) else { continue }
@@ -627,6 +629,7 @@ final class AccountStore {
             let name = session.name ?? "A session"
             let account = config.accounts.first { $0.id == target }?.name ?? "another account"
             if let failure = await act(on: session.pid, .rescue, reportError: false, automatic: true) {
+                if failure.contains("background work") { cannotRestart.insert(session.pid) }
                 notify("Couldn't rescue \(name)", failure)
             } else {
                 notify("Rescued \(name)", "Its account ran out, so it moved to \(account) and continued where it stopped.")
@@ -653,7 +656,7 @@ final class AccountStore {
                        ? "\(from) is close to a limit, and the session has commands running that a restart would kill. Type /login in its tab and sign in as \(to) to switch without restarting."
                        : "\(from) is close to a limit, but the session has background work running, so Side A won't exit it. When that work is done, /exit and run claude -c in its tab.")
         }
-        for session in sessions where session.restartable && session.status == "idle" && !freshLimit(session)
+        for session in sessions where session.restartable && !cannotRestart.contains(session.pid) && session.status == "idle" && !freshLimit(session)
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }
@@ -665,6 +668,7 @@ final class AccountStore {
             let name = session.name ?? "A session"
             let from = config.accounts.first { $0.id == id }?.name ?? "Its account"
             if let failure = await act(on: session.pid, target != nil ? .move : .opus, reportError: false, automatic: true) {
+                if failure.contains("background work") { cannotRestart.insert(session.pid) }
                 notify("Couldn't move \(name)", failure)
             } else if let target {
                 let account = config.accounts.first { $0.id == target }?.name ?? "another account"
