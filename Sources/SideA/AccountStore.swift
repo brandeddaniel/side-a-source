@@ -595,7 +595,7 @@ final class AccountStore {
                        : "It's a headless job on \(account); it can't be moved. It will stop until the limit resets.")
         }
         guard rescueStuckSessions else { return }
-        for session in sessions where session.restartable && (session.limitHit != nil || session.looksStuck(now: now))
+        for session in sessions where session.restartable && (freshLimit(session) || session.looksStuck(now: now))
             && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.isExhausted(value, onFable: session.onFable, now: now) else { continue }
@@ -642,7 +642,7 @@ final class AccountStore {
                        ? "\(from) is close to a limit, and the session has commands running that a restart would kill. Type /login in its tab and sign in as \(to) to switch without restarting."
                        : "\(from) is close to a limit, but the session has background work running, so Side A won't exit it. When that work is done, /exit and run claude -c in its tab.")
         }
-        for session in sessions where session.restartable && session.status == "idle" && session.limitHit == nil
+        for session in sessions where session.restartable && session.status == "idle" && !freshLimit(session)
             && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }
@@ -667,6 +667,12 @@ final class AccountStore {
     func fableSpent(_ accountID: String?) -> Bool {
         let now = Date().timeIntervalSince1970
         return accountID.flatMap { usage[$0]?.fable }.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
+    }
+    /// The session's limit error is newer than its account's latest reading. An older one (say, from
+    /// an account it was on before a /login) is history: the reading decides.
+    func freshLimit(_ session: LiveSession) -> Bool {
+        guard session.limitHit != nil, let at = session.limitAt, let id = session.accountID else { return false }
+        return at > (readAt[id]?.timeIntervalSince1970 ?? 0)
     }
     /// Waiting on you, or busy far too long, on an account where a limit it needs is spent.
     func isStuck(_ session: LiveSession) -> Bool {
