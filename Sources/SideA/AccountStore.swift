@@ -604,7 +604,9 @@ final class AccountStore {
                        : "It's a headless job on \(account); it can't be moved. It will stop until the limit resets.")
         }
         guard rescueStuckSessions else { return }
-        for session in sessions where session.restartable && (freshLimit(session) || session.looksStuck(now: now))
+        // Any limit error qualifies here: the account must also read as exhausted below, so an old error
+        // on an account with room does nothing, and a fresh reading that confirms it doesn't delay it.
+        for session in sessions where session.restartable && (session.limitHit != nil || session.looksStuck(now: now))
             && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
             guard let id = session.accountID, let value = trusted(id),
                   Planner.isExhausted(value, onFable: session.onFable, now: now) else { continue }
