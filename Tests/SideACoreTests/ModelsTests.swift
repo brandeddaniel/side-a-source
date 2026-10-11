@@ -247,3 +247,9 @@ import Testing
     let out = Date(timeIntervalSince1970: try #require(busy.runsOut))
     #expect(calendar.component(.weekday, from: out) == 4 && (16..<17).contains(calendar.component(.hour, from: out)))
 }
+
+@Test func cachedReadingsWithTheOldFableIDStillCount() throws {
+    let json = #"{"id":"seven_day_model:fable","label":"Weekly Fable","percent":100,"resetsAt":1}"#
+    let window = try JSONDecoder().decode(UsageWindow.self, from: Data(json.utf8))
+    #expect(window.id == "model:fable" && AccountUsage(windows: [window]).fable?.percent == 100)
+}

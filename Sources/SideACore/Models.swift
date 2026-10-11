@@ -82,6 +82,16 @@ public struct UsageWindow: Codable, Equatable, Sendable {
     public init(id: String, label: String, percent: Double, resetsAt: Double?) {
         self.id = id; self.label = label; self.percent = percent; self.resetsAt = resetsAt
     }
+    private enum CodingKeys: String, CodingKey { case id, label, percent, resetsAt }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try c.decode(String.self, forKey: .id)
+        // Readings cached before 0.5.18 named model caps "seven_day_model:<name>".
+        id = raw.hasPrefix("seven_day_model:") ? String(raw.dropFirst("seven_day_".count)) : raw
+        label = try c.decode(String.self, forKey: .label)
+        percent = try c.decode(Double.self, forKey: .percent)
+        resetsAt = try c.decodeIfPresent(Double.self, forKey: .resetsAt)
+    }
 }
 
 /// Paid usage past the plan's limits ("usage credits"), this month.
