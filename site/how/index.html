@@ -23,8 +23,8 @@
       </section>
 
       <section class="shots" aria-label="The app">
-        <figure><img src="../app-menu.webp" width="320" height="374" alt="Side A in the menu bar, showing each account's 5-hour and weekly limits" loading="lazy" decoding="async" /><figcaption>Every account, one click away.</figcaption></figure>
-        <figure><img src="../app-usage.webp" width="520" height="648" alt="Usage by day and project" loading="lazy" decoding="async" /><figcaption>Tokens by day, project and model.</figcaption></figure>
+        <figure><img draggable="false" src="../app-menu.webp" width="320" height="374" alt="Side A in the menu bar, showing each account's 5-hour and weekly limits" loading="lazy" decoding="async" /><figcaption>Every account, one click away.</figcaption></figure>
+        <figure><img draggable="false" src="../app-usage.webp" width="520" height="648" alt="Usage by day and project" loading="lazy" decoding="async" /><figcaption>Tokens by day, project and model.</figcaption></figure>
       </section>
 
       <section>
@@ -51,7 +51,7 @@
           <div class="hand worked">
             <p><span class="who">Account A</span> 60% left, resets in 24 h <span class="arrow">&rarr;</span> 60 &divide; 24 = <b>2.5</b></p>
             <p><span class="who">Account B</span> 90% left, resets in 144 h <span class="arrow">&rarr;</span> 90 &divide; 144 = <b>0.6</b></p>
-            <p class="note">A goes first. Its quota expires sooner.</p>
+            <p class="note"><span class="note-mark" role="button" tabindex="0" aria-pressed="false">A goes first. Its quota expires sooner.<svg viewBox="0 0 300 10" preserveAspectRatio="none" aria-hidden="true"><path d="M2 6 C 60 2, 120 9, 180 5 S 270 3, 298 6" /></svg></span></p>
           </div>
         </div>
         <dl class="rules">
@@ -69,7 +69,7 @@
           <div><dt>Writes</dt><dd>One marked line in <code>~/.zshrc</code> if you turn on switching, and its own folder in Application Support.</dd></div>
           <div><dt>Never</dt><dd>Copies, logs or uploads a login. Edits your Claude or Codex settings. Sends analytics unless you opt in.</dd></div>
         </dl>
-        <p class="fine">Open source under the MIT license. <a href="https://github.com/arnenoori/side-a-source">The source for every release</a> is public, tagged by version. Uses endpoints the CLIs use but don't document. Doesn't raise any limit. Starting a window costs a few tokens. Codex is tracked and warmed up, not switched. Not affiliated with Anthropic or OpenAI.</p>
+        <p class="fine"><a href="https://github.com/arnenoori/side-a-source">Open source</a> (MIT). Not affiliated with Anthropic or OpenAI.</p>
       </section>
 
       <div class="download-area"><a class="download" href="../">Get Side A</a></div>

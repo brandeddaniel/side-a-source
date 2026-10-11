@@ -59,7 +59,7 @@ export async function startPlayer() {
     mesh.name = item.name;
     mesh.userData.action = item.action;
     if (item.lid) { mesh.position.set(0, -0.45, 2.05); hinge.add(mesh); }
-    else if (item.name === 'Disc' || item.name.startsWith('Disc groove') || item.name === 'Disc label') disc.add(mesh);
+    else if (item.name === 'Disc' || item.name.startsWith('Disc groove') || item.name === 'Disc label') { mesh.userData.action = 'spin'; disc.add(mesh); }
     else player.add(mesh);
     controls.push(mesh);
     // Yield between batches so setup/download controls remain responsive during geometry creation.
@@ -78,7 +78,8 @@ export async function startPlayer() {
   controls.push(lcd);
   const fitPlayer = createPlayerFraming(camera, player);
   const accounts = [{ name: 'PERSONAL', provider: 'CLAUDE' }, { name: 'STUDIO', provider: 'CLAUDE' }, { name: 'SIDE PROJECT', provider: 'CODEX' }];
-  let track = 0, open = false, playing = false, auto = false, held = false;
+  let track = 0, open = false, playing = false, auto = false, held = false, sideB = false, repeatOne = false;
+  let holdTimer = 0, heldLong = false;
   let targetRotation = -0.12, frame = 0, previousTime = 0;
   let down: { x: number; y: number; rotation: number } | null = null;
   const ray = new THREE.Raycaster();
@@ -87,9 +88,9 @@ export async function startPlayer() {
     ctx.fillStyle = '#a6b887'; ctx.fillRect(0, 0, 820, 295);
     ctx.fillStyle = '#2c412b';
     ctx.font = '24px monospace';
-    ctx.fillText(`${accounts[track].provider}    ${auto ? 'AUTO' : 'SIDE A'}`, 40, 49);
-    ctx.font = 'bold 60px monospace'; ctx.fillText(accounts[track].name, 40, 143);
-    ctx.font = '23px monospace'; ctx.fillText(`${held ? 'HOLD' : playing ? 'PLAY' : 'READY'}                       0${track + 1} / 03`, 40, 241);
+    ctx.fillText(`${sideB ? 'BONUS' : accounts[track].provider}    ${sideB ? 'SIDE B' : auto ? 'AUTO' : 'SIDE A'}`, 40, 49);
+    ctx.font = 'bold 60px monospace'; ctx.fillText(sideB ? 'HIDDEN TRACK' : accounts[track].name, 40, 143);
+    ctx.font = '23px monospace'; ctx.fillText(`${held ? 'HOLD' : playing ? 'PLAY' : 'READY'}${repeatOne ? '  REPEAT 1' : '         '}              0${track + 1} / 03`, 40, 241);
     lcdTexture.needsUpdate = true;
     liveStatus.textContent = `Preview account: ${accounts[track].name}, ${accounts[track].provider}. ${playing ? 'Playing' : 'Ready'}. ${open ? 'Lid open.' : ''}`;
   }
@@ -118,6 +119,7 @@ export async function startPlayer() {
       case 'next': track = (track + 1) % accounts.length; break;
       case 'previous': track = (track + accounts.length - 1) % accounts.length; break;
       case 'play': playing = !playing; break;
+      case 'spin': if (!open) return; playing = !playing; break;
       case 'stop': playing = false; break;
       case 'mode': auto = !auto; break;
       case 'hold': held = !held; break;
@@ -133,17 +135,42 @@ export async function startPlayer() {
     ray.setFromCamera(pointer, camera);
     return ray.intersectObjects(controls, false)[0]?.object;
   }
-  canvas.addEventListener('pointerdown', event => { if (event.button === 0 && hit(event)) { down = { x: event.clientX, y: event.clientY, rotation: targetRotation }; canvas.setPointerCapture(event.pointerId); } });
+  canvas.addEventListener('pointerdown', event => {
+    const target = event.button === 0 ? hit(event) : undefined;
+    if (!target) return;
+    down = { x: event.clientX, y: event.clientY, rotation: targetRotation };
+    canvas.setPointerCapture(event.pointerId);
+    // Easter egg: hold play for two seconds to toggle repeat-one.
+    heldLong = false;
+    if (target.userData.action === 'play') holdTimer = window.setTimeout(() => { heldLong = true; repeatOne = !repeatOne; lcdUpdate(); schedule(); }, 2000);
+  });
   canvas.addEventListener('pointermove', event => {
     if (down) { targetRotation = THREE.MathUtils.clamp(down.rotation + (event.clientX - down.x) * 0.004, -0.65, 0.65); schedule(); }
     else canvas.style.cursor = hit(event)?.userData.action ? 'pointer' : hit(event) ? 'grab' : 'default';
   });
   canvas.addEventListener('pointerup', event => {
-    if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) < 7) activate(hit(event)?.userData.action);
+    clearTimeout(holdTimer);
+    if (down && !heldLong && Math.hypot(event.clientX - down.x, event.clientY - down.y) < 7) activate(hit(event)?.userData.action);
     down = null;
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
   });
-  canvas.addEventListener('pointercancel', () => { down = null; });
+  canvas.addEventListener('pointercancel', () => { clearTimeout(holdTimer); down = null; });
+  // Easter egg: the Konami code anywhere on the page flips the player to Side B.
+  const code = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+  let progress = 0;
+  addEventListener('keydown', event => {
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    // Extra ups keep the first two; any other miss restarts.
+    progress = key === code[progress] ? progress + 1 : key === 'ArrowUp' ? (progress === 2 ? 2 : 1) : 0;
+    if (progress < code.length) return;
+    progress = 0; sideB = !sideB; open = sideB; playing = sideB; held = false;
+    lcdUpdate(); schedule();
+  });
+  addEventListener('sidea:shuffle', () => {
+    if (held) return;
+    const steps = reducedMotion.matches ? 1 : 7;
+    for (let i = 1; i <= steps; i++) setTimeout(() => { track = Math.floor(Math.random() * accounts.length); lcdUpdate(); schedule(); }, i * 110);
+  });
   canvas.addEventListener('keydown', event => {
     const action = { ArrowLeft: 'previous', ArrowRight: 'next', Enter: 'open', ' ': 'play', Escape: 'stop' }[event.key];
     if (action) { event.preventDefault(); activate(action); }

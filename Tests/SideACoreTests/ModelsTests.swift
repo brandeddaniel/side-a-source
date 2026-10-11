@@ -101,6 +101,9 @@ import Testing
     // Forecast needs at least five minutes of rising samples.
     #expect(Planner.minutesToLimit([(0, 50), (600, 60)]) == 37)
     #expect(Planner.minutesToLimit([(0, 50), (120, 60)]) == nil)
+    // The estimate counts down between readings, and stale readings give none.
+    #expect(Planner.minutesToLimit([(0, 50), (600, 60)], now: 600 + 7 * 60) == 30)
+    #expect(Planner.minutesToLimit([(0, 50), (600, 60)], now: 600 + 11 * 60) == nil)
     let blocked = [soon.id: usage(99, now + hour, 40, now + 24 * hour), full.id: usage(10, now + hour, 99, now + 3 * hour)]
     #expect(Planner.nextAvailable([soon, full], usage: blocked, now: now)?.0.id == soon.id)
     // A 5-hour window above the switch target blocks until it resets, even below the hard limit.
@@ -111,8 +114,8 @@ import Testing
 @Test func fullFableWeeklyLimitBlocksLikeTheOverallWeeklyLimit() {
     let now = 1_000_000.0
     let window = { (id: String, percent: Double) in UsageWindow(id: id, label: id, percent: percent, resetsAt: now + 86_400) }
-    let fableFull = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 40), window("seven_day_model:fable", 98)])
-    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 60), window("seven_day_model:fable", 30)])
+    let fableFull = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 40), window("model:fable", 98)])
+    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 60), window("model:fable", 30)])
     #expect(fableFull.fable?.percent == 98)
     #expect(!Planner.hasHeadroom(fableFull, now: now))
     #expect(Planner.hasHeadroom(roomy, now: now))
@@ -124,10 +127,10 @@ import Testing
 @Test func plannerPrefersFableRoomAndOnlyThenFallsBackToOpus() {
     let now = 1_000_000.0
     let window = { (id: String, percent: Double) in UsageWindow(id: id, label: id, percent: percent, resetsAt: now + 86_400) }
-    let spent = { (weekly: Double) in AccountUsage(windows: [window("five_hour", 10), window("seven_day", weekly), window("seven_day_model:fable", 100)]) }
+    let spent = { (weekly: Double) in AccountUsage(windows: [window("five_hour", 10), window("seven_day", weekly), window("model:fable", 100)]) }
     let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
     let c = Account(name: "C", ready: true, allowAuto: true)
-    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 85), window("seven_day_model:fable", 20)])
+    let roomy = AccountUsage(windows: [window("five_hour", 10), window("seven_day", 85), window("model:fable", 20)])
     // C has the least overall quota at risk, but it is the only one with Fable left.
     let first = Planner.pick([a, b, c], usage: [a.id: spent(10), b.id: spent(20), c.id: roomy], active: a.id, now: now)
     #expect(first.id == c.id && !first.fableSpent)
@@ -160,11 +163,11 @@ import Testing
 @Test func sessionsLeaveAt90PercentAndPicksNeedRoomBelowIt() {
     let now = 1_000_000.0
     let w = { (id: String, percent: Double) in UsageWindow(id: id, label: id, percent: percent, resetsAt: now + 86_400) }
-    let fableNear = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 40), w("seven_day_model:fable", 92)])
+    let fableNear = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 40), w("model:fable", 92)])
     #expect(Planner.shouldLeave(fableNear, onFable: true, now: now))
     #expect(!Planner.shouldLeave(fableNear, onFable: false, now: now))
     #expect(!Planner.isSpent(fableNear, onFable: true, now: now))
-    let weeklySpent = AccountUsage(windows: [w("five_hour", 60), w("seven_day", 100), w("seven_day_model:fable", 28)])
+    let weeklySpent = AccountUsage(windows: [w("five_hour", 60), w("seven_day", 100), w("model:fable", 28)])
     #expect(Planner.isSpent(weeklySpent, onFable: true, now: now) && Planner.isSpent(weeklySpent, onFable: false, now: now))
     #expect(Planner.isExhausted(weeklySpent, onFable: false, now: now))
     // 97-99% still works: never a reason to interrupt a turn.
@@ -172,7 +175,7 @@ import Testing
     #expect(Planner.isSpent(nearly, onFable: false, now: now) && !Planner.isExhausted(nearly, onFable: false, now: now))
     // A nearly spent account is never a new pick, though the active one may run on up to the limit.
     let a = Account(name: "A", ready: true, allowAuto: true), b = Account(name: "B", ready: true, allowAuto: true)
-    let roomy = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 95), w("seven_day_model:fable", 20)])
+    let roomy = AccountUsage(windows: [w("five_hour", 10), w("seven_day", 95), w("model:fable", 20)])
     #expect(Planner.best([a, b], usage: [a.id: fableNear, b.id: roomy], active: nil, now: now) == nil)
     #expect(Planner.best([a, b], usage: [a.id: fableNear, b.id: roomy], active: a.id, now: now) == a.id)
 }
@@ -180,7 +183,7 @@ import Testing
 @Test func aSessionsLimitErrorCountsUntilANewerReading() {
     let now = 1_000_000.0
     let stale = AccountUsage(windows: [UsageWindow(id: "five_hour", label: "", percent: 0, resetsAt: now + 9000),
-                                       UsageWindow(id: "seven_day_model:fable", label: "", percent: 53, resetsAt: now + 90_000)])
+                                       UsageWindow(id: "model:fable", label: "", percent: 53, resetsAt: now + 90_000)])
     let raised = Planner.withEvidence(stale, limit: "fable", at: now - 60, readAt: now - 900, now: now)
     #expect(raised.fable?.percent == 100 && Planner.isExhausted(raised, onFable: true, now: now))
     #expect(!Planner.isExhausted(raised, onFable: false, now: now))
@@ -195,4 +198,52 @@ import Testing
                  21247, 20781, 18890, 13652, 12336, 9746, 6467, 6917, 4080, 3143]
     let schedule = WorkSchedule(Array(repeating: ActivitySpan(date: "d", hours: hours), count: 14))!
     #expect(schedule.start == 480 && schedule.end == 1320)
+}
+
+@Test func fablePlanningSkipsSpentFableCapsAndPlansWithoutFable() {
+    let now = Date().timeIntervalSince1970
+    func usage(weekly: Double, fable: Double?, capacity: Double) -> AccountUsage {
+        AccountUsage(windows: [UsageWindow(id: "five_hour", label: "5-hour", percent: 10, resetsAt: now + 3600),
+                               UsageWindow(id: "seven_day", label: "Weekly", percent: weekly, resetsAt: now + 86_400)]
+                     + (fable.map { [UsageWindow(id: "model:fable", label: "Weekly Fable", percent: $0, resetsAt: now + 86_400)] } ?? []),
+                     capacity: capacity)
+    }
+    let spent = Account(name: "Spent", ready: true, allowAuto: true), room = Account(name: "Room", ready: true, allowAuto: true)
+    let pro = Account(name: "Pro", ready: true, allowAuto: true), almost = Account(name: "Almost", ready: true, allowAuto: true)
+    let all = [spent.id: usage(weekly: 40, fable: 100, capacity: 20), room.id: usage(weekly: 60, fable: 20, capacity: 5),
+               pro.id: usage(weekly: 0, fable: nil, capacity: 1), almost.id: usage(weekly: 99, fable: 0, capacity: 20)]
+    let accounts = [spent, room, pro, almost]
+    // This fork treats a spent Fable cap as blocking, so even plain planning leaves it.
+    #expect(Planner.best(accounts, usage: all, active: spent.id, now: now) != spent.id)
+    // Weekly room caps Fable room: an account 99% through its week has almost no Fable left.
+    #expect(all[almost.id]!.forFable!.weekly!.percent == 98)
+    // A Max plan with no Fable cap listed yet still has its Fable share; a Pro plan has none.
+    #expect(usage(weekly: 10, fable: nil, capacity: 20).forFable?.weekly?.percent == 0)
+    #expect(all[pro.id]!.forFable == nil)
+    #expect(Planner.best(accounts, usage: all.compactMapValues(\.forFable), active: spent.id, now: now) == room.id)
+}
+
+@Test func weekForecastFollowsAWeekdayRhythmNotAStraightLine() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "UTC")!
+    // Four weeks of weekday 9:00-17:00 work, nothing on weekends. 2026-09-07 is a Monday.
+    let monday = try Date("2026-09-07T00:00:00Z", strategy: .iso8601).timeIntervalSince1970
+    let activity = (0..<28).map { day -> ActivitySpan in
+        let date = Date(timeIntervalSince1970: monday + Double(day) * 86_400)
+        let weekend = [1, 7].contains(calendar.component(.weekday, from: date))
+        return ActivitySpan(date: Date.ISO8601FormatStyle(timeZone: calendar.timeZone).year().month().day().format(date),
+                            hours: (0..<24).map { !weekend && (9..<17).contains($0) ? 10 : 0 })
+    }
+    let rhythm = try #require(WeekRhythm(activity, calendar: calendar))
+    let reset = monday + 35 * 86_400  // the next Monday 00:00
+    // Friday 17:00: the work week is over, so half the limit used means about half by the reset,
+    // where a straight line would have projected 70%.
+    let friday = reset - 7 * 86_400 + 4 * 86_400 + 17 * 3600
+    let calm = try #require(WeekForecast(UsageWindow(id: "seven_day", label: "Weekly", percent: 50, resetsAt: reset), rhythm: rhythm, now: friday))
+    #expect(calm.projected < 55 && calm.expectedNow > 0.9 && calm.runsOut == nil)
+    // Wednesday 12:00 at 80% after 19 of 40 working hours: the last 20% lasts about 5 more working hours.
+    let wednesday = reset - 7 * 86_400 + 2 * 86_400 + 12 * 3600
+    let busy = try #require(WeekForecast(UsageWindow(id: "seven_day", label: "Weekly", percent: 80, resetsAt: reset), rhythm: rhythm, now: wednesday))
+    let out = Date(timeIntervalSince1970: try #require(busy.runsOut))
+    #expect(calendar.component(.weekday, from: out) == 4 && (16..<17).contains(calendar.component(.hour, from: out)))
 }

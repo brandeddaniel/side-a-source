@@ -35,7 +35,7 @@
       <div class="stage" id="stage" role="group" aria-label="Interactive Side A player preview">
         <picture>
           <source type="image/avif" srcset="./poster-small.avif 624w, ./poster.avif 1248w" sizes="(max-width: 600px) 90vw, 624px" />
-          <img class="fallback" id="fallback" src="./poster.webp" srcset="./poster-small.webp 624w, ./poster.webp 1248w" sizes="(max-width: 600px) 90vw, 624px" width="1248" height="1120" alt="Side A’s silver portable account player" fetchpriority="high" decoding="async" />
+          <img draggable="false" class="fallback" id="fallback" src="./poster.webp" srcset="./poster-small.webp 624w, ./poster.webp 1248w" sizes="(max-width: 600px) 90vw, 624px" width="1248" height="1120" alt="Side A’s silver portable account player" fetchpriority="high" decoding="async" />
         </picture>
         <canvas id="player" tabindex="0" aria-label="Try the player. Left and right arrows switch demo accounts. Enter opens the lid. Space plays or pauses." aria-describedby="model-hint"></canvas>
         <div class="sr-only" id="model-hint">Go on. Press a button.</div>

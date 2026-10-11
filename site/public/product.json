@@ -17,7 +17,7 @@
     "Codex"
   ],
   "releaseStatus": "public-preview",
-  "version": "0.5.4",
+  "version": "0.5.7",
   "releasesURL": "https://github.com/arnenoori/side-a-releases/releases",
   "limitations": [
     "Relies on usage and login endpoints the CLIs use but do not document; CLI updates can change them",

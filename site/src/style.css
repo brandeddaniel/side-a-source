@@ -7,7 +7,13 @@
   --muted: #657069;
   --line: #dfe3df;
   --orange: #e94f24;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  color-scheme: light;
+  -webkit-font-smoothing: antialiased;
 }
+::selection { background: #e94f2438; color: var(--ink); }
+/* Images and the player are not meant to be dragged out of the page. */
+img, canvas { -webkit-user-drag: none; user-select: none; -webkit-user-select: none; }
 * { box-sizing: border-box; }
 body { margin: 0; }
 button, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
@@ -16,36 +22,44 @@ a { color: inherit; text-underline-offset: 4px; }
 button:focus-visible, a:focus-visible, canvas:focus-visible, summary:focus-visible {
   outline: 2px solid var(--orange); outline-offset: 5px;
 }
-button:active, .download:active { transform: scale(.98); }
-button, .download { transition: color 120ms, background-color 120ms, transform 120ms; }
+button:active, .download:active { transform: scale(.97); }
+button, .download { transition: color 120ms ease, background-color 120ms ease, transform 160ms var(--ease-out); }
 .page {
   width: min(1440px, 100%); min-height: 100svh; margin: auto;
   padding: 26px 48px 16px; display: flex; flex-direction: column;
 }
 header { display: flex; align-items: center; justify-content: space-between; min-height: 44px; }
 .wordmark { display: flex; align-items: center; gap: 9px; text-decoration: none; font-size: 22px; font-weight: 600; letter-spacing: -.8px; }
-.disc-mark { width: 22px; height: 22px; border: 1.5px solid currentColor; border-radius: 50%; position: relative; }
+.disc-mark { width: 22px; height: 22px; border: 1.5px solid currentColor; border-radius: 50%; position: relative; transition: transform 300ms var(--ease-out); }
+/* The off-center dot makes each turn visible. */
+.disc-mark::before { content: ""; position: absolute; width: 3px; height: 3px; border-radius: 50%; background: currentColor; top: 3px; left: 50%; margin-left: -1.5px; }
 .disc-mark::after { content: ""; position: absolute; inset: 7px; border: 1.5px solid currentColor; border-radius: 50%; }
 .quiet-button, footer a { min-width: 44px; min-height: 44px; padding: 10px 0; border: 0; background: none; font-size: 12px; }
 main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 0; }
 .stage { height: clamp(300px, 60svh, 580px); width: min(800px, 100%); position: relative; }
-.stage canvas { width: 100%; height: 100%; display: block; touch-action: pan-y; opacity: 0; transition: opacity 200ms; }
+.stage canvas { width: 100%; height: 100%; display: block; touch-action: pan-y; opacity: 0; transition: opacity 200ms var(--ease-out); }
 .stage.ready canvas { opacity: 1; }
 .fallback { position: absolute; width: 85%; height: 100%; left: 7.5%; top: 0; object-fit: contain; pointer-events: none; }
 /* Hide the poster only after the canvas has faded in, or the stage flashes empty. */
 .stage.ready .fallback { visibility: hidden; transition: visibility 0s 220ms; }
 @view-transition { navigation: auto; }
+::view-transition-group(root) { animation-duration: 180ms; animation-timing-function: var(--ease-out); }
+header { view-transition-name: header; }
 .download-area { text-align: center; padding: 20px 0 8px; }
 .download { min-width: 192px; min-height: 48px; display: inline-flex; gap: 10px; justify-content: center; align-items: center; padding: 14px 24px; background: var(--ink); color: white; border-radius: 30px; text-decoration: none; font-size: 13px; font-weight: 500; }
-.download:hover { background: #3b4540; }
+@media (hover: hover) and (pointer: fine) { .download:hover { background: #3b4540; } }
 .download[aria-disabled=true] { background: #e6e9e6; color: #747c77; cursor: default; }
 .requirements { font-size: 11px; color: var(--muted); margin: 14px 0 0; }
 footer { display: flex; justify-content: center; color: var(--muted); }
 footer a { font-size: 11px; text-decoration: none; }
 .text-button { padding: 0; border: 0; background: none; font: inherit; text-decoration: underline; text-underline-offset: 4px; }
-footer a:hover, .quiet-button:hover { color: var(--ink); }
+@media (hover: hover) and (pointer: fine) { footer a:hover, .quiet-button:hover { color: var(--ink); } }
 dialog { border: 1px solid #e0e4df; border-radius: 22px; padding: 32px; background: #fafbf9; color: var(--ink); width: min(390px, calc(100% - 32px)); box-shadow: 0 24px 90px #20282024; max-height: calc(100svh - 48px); overflow-y: auto; }
 dialog::backdrop { background: #20282030; backdrop-filter: blur(8px); }
+/* Occasional and modal: a short fade and settle, centered. */
+dialog[open] { opacity: 1; transform: none; transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out); }
+dialog[open]::backdrop { opacity: 1; transition: opacity 200ms var(--ease-out); }
+@starting-style { dialog[open] { opacity: 0; transform: scale(.96); } dialog[open]::backdrop { opacity: 0; } }
 dialog h2 { font-size: 26px; letter-spacing: -.8px; font-weight: 600; margin: 0 0 28px; }
 dialog p { font-size: 13px; line-height: 1.6; color: #626b65; }
 .close { position: absolute; right: 12px; top: 12px; width: 44px; height: 44px; font-size: 25px; border: 0; background: none; }
@@ -64,7 +78,10 @@ summary { min-height: 44px; display: list-item; align-content: center; cursor: p
   dialog { padding: 28px; }
 }
 @media(prefers-reduced-motion:reduce) {
-  *, *::before, *::after { transition: none!important; animation: none!important; scroll-behavior: auto!important; }
+  /* Gentler, not zero: keep fades, drop movement. */
+  button:active, .download:active { transform: none; }
+  @starting-style { dialog[open] { transform: none; } }
+  * { scroll-behavior: auto !important; }
 }
 nav { display: flex; align-items: center; gap: 22px; }
 .quiet-button { display: inline-flex; align-items: center; text-decoration: none; color: var(--muted); line-height: 1; }

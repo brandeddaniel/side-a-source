@@ -11,6 +11,7 @@ struct MenuPlayer: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @AppStorage("tourSeen") private var tourSeen = false
+    @AppStorage("playerEnabled") private var playerEnabled = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -42,13 +43,6 @@ struct MenuPlayer: View {
             .frame(maxHeight: 440)
             .fixedSize(horizontal: false, vertical: true)
             FableSessions(store: store)
-            if !store.shellSwitching && !store.isDemo && store.config.accounts.contains(where: { $0.provider == .claude }) {
-                HStack {
-                    Text("Switching is off in Terminal").font(.system(size: 11))
-                    Spacer()
-                    Button("Turn on") { Task { await store.setShellSwitching(true) } }.controlSize(.small)
-                }
-            }
             if store.unknownLogins[.claude] == nil, let next = Planner.nextAvailable(store.config.accounts.filter { $0.provider == .claude }, usage: store.usage, now: Date().timeIntervalSince1970),
                Planner.best(store.config.accounts.filter { $0.provider == .claude }, usage: store.usage, active: nil, now: Date().timeIntervalSince1970, ignoringModelLimits: true) == nil {
                 Text("All limited. \(next.0.name) is back \(UsageBar.format(next.1)).")
@@ -78,7 +72,7 @@ struct MenuPlayer: View {
             HStack(spacing: 14) {
                 Button { store.openLibrary() } label: { Label("Add account", systemImage: "plus") }.tourAnchor(.add)
                 Spacer()
-                Button { openPlayer() } label: { Image(systemName: "opticaldisc") }.help("Show the player")
+                if playerEnabled { Button { openPlayer() } label: { Image(systemName: "opticaldisc") }.help("Show the player") }
                 Button { store.settingsTab = .general; store.openSettings() } label: { Image(systemName: "gearshape") }.help("Settings")
                 Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }.help("Quit Side A")
             }.buttonStyle(.borderless).font(.system(size: 12))
@@ -101,7 +95,7 @@ struct ProviderSection: View {
         let accounts = store.config.accounts.filter { $0.provider == provider }
         let now = Date().timeIntervalSince1970
         let limited = accounts.filter { account in
-            !store.isActive(account) && (store.usage[account.id]?.weeklyLimits ?? []).contains { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }
+            !store.isActive(account) && (store.usage[account.id]?.weeklyLimits ?? []).contains { $0.percent >= Planner.limited && ($0.resetsAt ?? 0) > now }
         }
         if !accounts.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
@@ -136,9 +130,13 @@ struct AccountUsageRow: View {
     @Bindable var store: AccountStore
     let account: Account
     var body: some View {
+        // Redraws every 30 seconds so countdowns move while the menu stays open.
+        TimelineView(.periodic(from: .now, by: 30)) { _ in row }
+    }
+    private var row: some View {
         let isActive = store.isActive(account)
         let usage = store.usage[account.id]
-        HStack(spacing: 8) {
+        return HStack(spacing: 8) {
             Circle().fill(isActive ? Color.green : Color.secondary.opacity(0.35)).frame(width: 7, height: 7)
                 .accessibilityLabel(isActive ? "Active on this Mac" : "Not active")
             VStack(alignment: .leading, spacing: 1) {
@@ -155,9 +153,13 @@ struct AccountUsageRow: View {
                 if showFable { MiniBar(label: "fb", window: usage.fable, width: width) }
             }
             Group {
-                if !account.ready {
+                if !account.ready || (store.issues[account.id] == "signIn" && !isActive) {
                     Button("Sign in") { Task { await store.signIn(account.id) } }
                         .disabled(store.signingIn.contains(account.id))
+                } else if store.issues[account.id] == "idle" && usage == nil && account.provider == .claude {
+                    Button("Renew") { Task { await store.wake(account.id) } }
+                        .disabled(store.waking.contains(account.id))
+                        .help("Has Claude Code renew this login; no model runs and no quota is used")
                 } else if !isActive && account.provider == .claude {
                     Button("Use") { Task { await store.activate(account.id) } }.tourAnchor(.use)
                         .help("New claude commands use this account")
@@ -169,18 +171,21 @@ struct AccountUsageRow: View {
         .frame(minHeight: 28)
         .contextMenu {
             if !isActive && account.ready && account.provider == .claude { Button("Use") { Task { await store.activate(account.id) } } }
+            if account.ready && account.provider == .claude { Button("Open Terminal on \(account.name)") { Task { await store.openTerminal(account.id) } } }
+            if !isActive { Button("Sign in again") { Task { await store.signIn(account.id) } } }
             Button("Settings…") { store.settingsTab = .accounts; store.openSettings() }
         }
     }
 
     private var caption: String? {
         guard account.ready else { return "Not signed in" }
+        if let issue = store.issueText(account.id) { return issue }
         guard let usage = store.usage[account.id] else { return "Reading…" }
         if usage.stale { return "Sign in again" }
-        if store.readsFailing(account.id) { return "Can't read limits; numbers may be old" }
         if let minutes = store.minutesToLimit(account.id), minutes < 300 { return "Limit in ~\(Self.duration(minutes))" }
         let now = Date().timeIntervalSince1970
-        if let blocked = ([usage.fiveHour].compactMap({ $0 }) + usage.weeklyLimits).filter({ $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }).compactMap(\.resetsAt).max() {
+        if let blocked = ([usage.fiveHour].compactMap({ $0 }) + usage.weeklyLimits).filter({ $0.percent >= Planner.limited && ($0.resetsAt ?? 0) > now }).compactMap(\.resetsAt).max() {
+            if let extra = usage.extra, extra.enabled { return "Charging paid credits · \(extra.money(extra.used)) this month" }
             return "Back \(UsageBar.format(blocked))"
         }
         return nil
@@ -237,8 +242,8 @@ struct FableSessions: View {
                         }
                     }.font(.system(size: 11))
                 }
-                if !store.fixFableSessions && sessions.contains(where: { store.fableSpent($0.accountID) }) {
-                    Text("Use ⋯ to move a session or switch it to Opus, or turn on fixing Fable sessions in Autopilot settings.")
+                if sessions.contains(where: { store.fableSpent($0.accountID) }) {
+                    Text("Autopilot trades a spent account's login for one with room; use ⋯ to switch a session to Opus instead.")
                         .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -251,6 +256,8 @@ struct MiniBar: View {
     let label: String
     let window: UsageWindow?
     var width: CGFloat = 46
+    /// Shows when the window resets under the bar instead of only in the tooltip.
+    var showsReset = false
     var body: some View {
         let percent = min(max(window?.percent ?? 0, 0), 100)
         VStack(alignment: .trailing, spacing: 2) {
@@ -258,9 +265,13 @@ struct MiniBar: View {
                 .font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
             Capsule().fill(.quaternary).frame(width: width, height: 4)
                 .overlay(alignment: .leading) {
-                    Capsule().fill(percent >= Planner.full ? Color.red : percent >= 75 ? .orange : .accentColor)
+                    Capsule().fill(percent >= Planner.limited ? Color.red : percent >= 75 ? .orange : .accentColor)
                         .frame(width: width * percent / 100, height: 4)
                 }
+            if showsReset {
+                Text(window?.resetsAt.flatMap { $0 > Date().timeIntervalSince1970 ? UsageBar.format($0).replacingOccurrences(of: "in ", with: "") : nil } ?? " ")
+                    .font(.system(size: 9).monospacedDigit()).foregroundStyle(.tertiary).lineLimit(1)
+            }
         }
         .help(window?.resetsAt.map { "\(window?.label ?? label) resets \(UsageBar.format($0))" } ?? "")
         .accessibilityElement(children: .combine)
@@ -288,10 +299,10 @@ struct UsageBar: View {
                 }
             }
             ProgressView(value: percent, total: 100).progressViewStyle(.linear)
-                .tint(percent >= Planner.full ? .red : percent >= 75 ? .orange : .accentColor)
+                .tint(percent >= Planner.limited ? .red : percent >= 75 ? .orange : .accentColor)
         }.accessibilityElement(children: .combine)
     }
-    static func format(_ reset: Double) -> String {
+    nonisolated static func format(_ reset: Double) -> String {
         let date = Date(timeIntervalSince1970: reset)
         let seconds = date.timeIntervalSinceNow
         if seconds < 24 * 3600 {

@@ -3,6 +3,7 @@ import { analytics } from './analytics';
 import { latestDownloadableRelease, releaseAPI, releasesURL } from './release.mjs';
 
 analytics.capture('$pageview');
+console.log('%cSide A%c  Read the source: https://github.com/arnenoori/side-a-source  (and try the Konami code)', 'font-weight:600', 'color:#657069');
 const analyticsToggle = document.querySelector<HTMLInputElement>('#analytics-enabled')!;
 analyticsToggle.checked = analytics.isEnabled();
 analyticsToggle.disabled = analytics.privacySignal();
@@ -83,3 +84,14 @@ if (modelContext?.registerTool) {
     try { void Promise.resolve(modelContext.registerTool(tool)).catch(() => {}); } catch { /* Early implementations may differ. */ }
   }
 }
+
+// Easter egg: the logo disc turns with each tap; five quick taps shuffle the player's tracks.
+const mark = document.querySelector<HTMLElement>('.disc-mark');
+let turns = 0, taps = 0, lastTap = 0;
+mark?.addEventListener('click', event => {
+  event.preventDefault();
+  mark.style.transform = `rotate(${++turns * 180}deg)`;
+  taps = performance.now() - lastTap < 600 ? taps + 1 : 1;
+  lastTap = performance.now();
+  if (taps === 5) { taps = 0; dispatchEvent(new Event('sidea:shuffle')); }
+});

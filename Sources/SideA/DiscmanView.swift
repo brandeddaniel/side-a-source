@@ -189,20 +189,6 @@ struct DiscmanView: NSViewRepresentable {
         private var guideMaterials: [String: SCNMaterial] = [:]
         private var guideSignature = ""
 
-        /// Silver with a faint rainbow that turns around the center, like the data side of a CD.
-        static func discSheen() -> NSImage {
-            NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
-                let center = NSPoint(x: rect.midX, y: rect.midY)
-                for step in 0..<180 {
-                    let start = CGFloat(step) * 2, path = NSBezierPath()
-                    path.move(to: center)
-                    path.appendArc(withCenter: center, radius: rect.width, startAngle: start, endAngle: start + 2.4)
-                    NSColor(hue: CGFloat(step % 90) / 90, saturation: 0.22, brightness: 0.92, alpha: 1).setFill()
-                    path.fill()
-                }
-                return true
-            }
-        }
         static func studioEnvironment() -> NSImage {
             NSImage(size: NSSize(width: 512, height: 256), flipped: false) { rect in
                 NSGradient(colors: [NSColor(white: 0.18, alpha: 1), NSColor(white: 0.55, alpha: 1), NSColor(white: 0.98, alpha: 1)])?
@@ -239,14 +225,6 @@ struct DiscmanView: NSViewRepresentable {
                     material.diffuse.contents = NSColor(red: mesh.color[0], green: mesh.color[1], blue: mesh.color[2], alpha: 1)
                     material.metalness.contents = mesh.metallic
                     material.roughness.contents = mesh.roughness
-                    if mesh.name == "Disc" {
-                        material.diffuse.contents = Self.discSheen()
-                        material.metalness.contents = 1.0
-                        material.roughness.contents = 0.14
-                    } else if mesh.name == "Disc label" {
-                        material.diffuse.contents = NSColor(white: 0.93, alpha: 1)
-                        material.roughness.contents = 0.55
-                    }
                     geometry.materials = [material]
                     if mesh.name == "button_open" { guideMaterials["open"] = material }
                     if mesh.name == "button_play" { guideMaterials["play"] = material }

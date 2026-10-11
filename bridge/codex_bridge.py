@@ -45,11 +45,12 @@ class RPC:
                 if response.get("id") == identifier and "method" not in response:
                     if "error" in response:
                         message = str((response.get("error") or {}).get("message") or "")
-                        # Keep only what the app acts on: rate limits back off, revoked logins need sign-in.
-                        if "429" in message or "rate limit" in message.lower():
-                            raise ValueError("Codex usage is rate-limited (429).")
+                        # Keep only what the app acts on: revoked logins need sign-in, rate limits back off.
+                        # Revocation first: its message also says "failed to fetch codex rate limits".
                         if "401" in message or "token_revoked" in message:
                             raise ValueError("Sign in again: Codex rejected this login.")
+                        if "429" in message or "too many requests" in message.lower():
+                            raise ValueError("Codex usage is rate-limited (429).")
                         raise ValueError("Codex could not complete the account check. Update Codex and retry.")
                     return response["result"]
             if select.select([self.process.stdout], [], [], .1)[0]:

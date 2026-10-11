@@ -30,8 +30,8 @@ def finish(o,name,mat,lid=False,action=None,bevel=0):
   for p in o.data.polygons:p.use_smooth=True
  return o
 
-def cyl(name,r,d,loc,mat,lid=False,action=None):
- bpy.ops.mesh.primitive_cylinder_add(vertices=128,radius=r,depth=d,location=loc)
+def cyl(name,r,d,loc,mat,lid=False,action=None,fill='NGON'):
+ bpy.ops.mesh.primitive_cylinder_add(vertices=128,radius=r,depth=d,location=loc,end_fill_type=fill)
  return finish(bpy.context.object,name,mat,lid,action,.025)
 
 def box(name,loc,scale,mat,lid=False,action=None,bevel=.04):
@@ -46,7 +46,8 @@ def text(name,words,loc,size,mat,lid=False):
 
 cyl('Lower shell',2.24,.34,(0,0,.15),black)
 cyl('Silver chassis',2.27,.16,(0,0,.33),silver)
-cyl('Lid shadow seam',2.235,.06,(0,0,.44),rubber)
+# Open-ended: a capped seam covered the disc whenever the lid opened.
+cyl('Lid shadow seam',2.235,.06,(0,0,.44),rubber,fill='NOTHING')
 cyl('Lid edge',2.23,.10,(0,0,.52),edge,True,'open')
 cyl('Lid',2.20,.13,(0,0,.605),silver,True,'open')
 cyl('Inset optical well',1.97,.025,(0,0,.43),black)

@@ -19,7 +19,7 @@ struct BridgeFailure: LocalizedError, Sendable {
 
 @MainActor @Observable
 final class AccountStore {
-    var config = Configuration()
+    var config = Configuration() { didSet { Planner.full = config.swapAt ?? 95 } }
     var dependencies = DependencyReport()
     var checkingDependencies = false
     var error: String?
@@ -28,59 +28,46 @@ final class AccountStore {
     /// Mac-wide login emails that are not in the library yet.
     var unknownLogins: [AgentProvider: String] = [:]
     var report: UsageReport?
+    /// Model of the newest Claude Code response in the last half hour.
+    var claudeModel: String?
     var limitHook = false
     /// The `claude` shell function that makes new commands use the chosen account.
     var shellSwitching = false
-    /// Every account's Fable limit is spent, so new commands resolve `fable` to Opus.
-    var fableToOpus = false
-    /// Opt-in `fallbackModel` in Claude Code's settings.
-    var opusFallback = false
-    var sessions: [LiveSession] = []
-    /// Sessions Side A is typing into right now.
-    var actingOn: Set<Int> = []
-    /// Opt-in: when a Fable session's account runs out of Fable, move it to an account with Fable
-    /// left, or switch it to Opus when none has any, by typing into its Ghostty tab.
-    var fixFableSessions = UserDefaults.standard.bool(forKey: "sidea.fixFableSessions") {
-        didSet { UserDefaults.standard.set(fixFableSessions, forKey: "sidea.fixFableSessions") }
-    }
-    @ObservationIgnored private var fixedAt: [Int: Date] = [:]
-    @ObservationIgnored private var switchedToOpus: Set<Int> = []
-    /// Limit hits already reported because Side A could not move the session itself.
-    @ObservationIgnored private var limitReported: [Int: Double] = [:]
-    /// Sessions already told they should move but can't be moved automatically (background work).
-    @ObservationIgnored private var moveSuggested: [Int: String] = [:]
-    /// Fable sessions already reported as stuck, until they move on.
-    @ObservationIgnored private var stuckNotified: Set<Int> = []
+    var liveLimits = false
+    /// When a Claude Code session last reported each account's limits.
+    private var liveAt: [String: Double] = [:]
+    private var liveSeen = Date.distantPast
+    /// Keychain slots running claude processes read, with the account whose login is in each;
+    /// nil when processes can't be listed.
+    private var busyLogins: [String: String]?
     @ObservationIgnored private var reportAt = Date.distantPast
     @ObservationIgnored private var limitMarkerDate: Date?
     var usage: [String: AccountUsage] = [:]
     var signingIn: Set<String> = []
+    /// Why an account's numbers are not current: "idle", "signIn" or "offline". Absent when they are.
+    var issues: [String: String] = [:]
+    var waking: Set<String> = []
     @ObservationIgnored private var primedAt: [String: Date] = [:]
     @ObservationIgnored private var usageAt: [String: Date] = [:]
     @ObservationIgnored private var backoffUntil: [String: Date] = [:]
     /// Accounts whose latest read failed for a reason other than being idle. They keep their
     /// last bars on screen but are left out of Autopilot until a read succeeds.
     @ObservationIgnored private var failing: Set<String> = []
-    /// When each failing account's reads started failing. A brief failure is a hiccup; one that lasts
-    /// means its real limits are unknown, so Autopilot may move the Mac off it.
-    @ObservationIgnored private var failingSince: [String: Date] = [:]
-    /// When each account was last read successfully; `usageAt` is the last attempt.
-    @ObservationIgnored private var readAt: [String: Date] = [:]
-    @ObservationIgnored private var loginStamps: [String: Double] = [:]
-    /// Accounts whose login nobody has used since it expired: their last reading stays current
-    /// until someone uses them (a read then succeeds or fails and clears this).
-    @ObservationIgnored private var idle: Set<String> = []
-    /// Sessions that turned out to have background work /exit would end: never restarted again.
-    @ObservationIgnored private var cannotRestart: Set<Int> = []
-    /// Accounts already reported as having their login replaced, until they read again.
-    @ObservationIgnored private var replacedNotified: Set<String> = []
-    func readsFailing(_ id: String) -> Bool { failing.contains(id) }
     @ObservationIgnored private var reading: Set<String> = []
     /// Bumped by every switch, so an "active" answer that started earlier cannot overwrite it.
     @ObservationIgnored private var selectionGeneration = 0
     /// Recent (time, 5-hour percent) samples per account for the burn-rate forecast.
     @ObservationIgnored private var samples: [String: [(Double, Double)]] = [:]
     @ObservationIgnored private var exhaustedNotified = false
+    /// Per account: the window reset already warned about, so each limit warns once.
+    @ObservationIgnored private var paidWarned: [String: Double] = [:]
+    @ObservationIgnored private var loginStamps: [String: Double] = [:]
+    @ObservationIgnored private var endWarned: [String: Double] = [:]
+    @ObservationIgnored private var renewedAt: [String: Date] = [:]
+    /// When each Claude sign-in stops renewing; about a month after signing in.
+    var loginEnds: [String: Double] = [:]
+    /// When each account was last read successfully, for marking old readings.
+    var readAt: [String: Date] = [:]
     var lidOpen = false
     /// The player only stays open when asked for; macOS would otherwise restore it at launch.
     var playerRequested = false
@@ -135,7 +122,15 @@ final class AccountStore {
                                             row("/Users/you/code/mobile", project: true, 3_800_000_000), row("/Users/you/code/docs", project: true, 900_000_000)],
                                  models: [row("claude-opus-5-5", project: false, 14_200_000_000), row("claude-sonnet-5-5", project: false, 5_300_000_000),
                                           row("claude-haiku-4-5", project: false, 700_000_000)],
-                                 activity: (0..<14).map { ActivitySpan(date: "d\($0)", hours: (0..<24).map { (9...18).contains($0) ? 40 : 1 }) })
+                                 activity: (0..<14).map { ActivitySpan(date: "d\($0)", hours: (0..<24).map { (9...18).contains($0) ? 40 : 1 }) },
+                                 dayModels: days.flatMap { day in
+                                     [("claude-opus-5-5", 0.7), ("claude-sonnet-5-5", 0.26), ("claude-haiku-4-5", 0.04)].map { model, share in
+                                         var split = day; split.model = model
+                                         split.input = Int(Double(day.input) * share); split.output = Int(Double(day.output) * share)
+                                         split.cacheWrite = Int(Double(day.cacheWrite) * share); split.cacheRead = Int(Double(day.cacheRead) * share)
+                                         return split
+                                     }
+                                 })
         } else if FileManager.default.fileExists(atPath: configURL.path) {
             do { config = try PrivateFile.read(Configuration.self, from: configURL).validated() }
             catch { self.error = error.localizedDescription; startupError = true }
@@ -145,12 +140,11 @@ final class AccountStore {
         }
         if !isDemo, let cache = try? PrivateFile.read(UsageCache.self, from: usageCacheURL) {
             // Show the last numbers at once and keep each account on its normal polling schedule.
-            // Readings from before model-scoped limits (Fable) were tracked are re-read at once.
-            usage = cache.usage; usageAt = cache.modelLimits == true ? cache.at : [:]
-            backoffUntil = cache.backoff ?? [:]; primedAt = cache.primed ?? [:]; failing = Set(cache.failing ?? [])
-            // Counted from now: one old failure must not move the Mac off its account at launch.
-            for id in failing { failingSince[id] = Date() }
-            readAt = cache.readAt ?? [:]
+            usage = cache.usage; usageAt = cache.at
+            backoffUntil = cache.backoff ?? [:]; primedAt = cache.primed ?? [:]; failing = Set(cache.failing ?? []).intersection(config.accounts.map(\.id))
+            issues = (cache.issues ?? [:]).filter { id, _ in config.accounts.contains { $0.id == id } }
+            // Caches from before readAt existed only know when a read was last attempted.
+            readAt = cache.readAt ?? cache.at
             activeIDs = (cache.active ?? [:]).reduce(into: [:]) { ids, item in AgentProvider(rawValue: item.key).map { ids[$0] = item.value } }
         }
         if !isDemo {
@@ -178,7 +172,7 @@ final class AccountStore {
                 await self?.tick()
                 // Wake early when the rate-limit hook fires, otherwise once a minute.
                 for _ in 0..<30 {
-                    if self?.limitHit() == true { break }
+                    if self?.limitHit() == true || self?.liveChanged() == true { break }
                     try? await Task.sleep(for: .seconds(2))
                 }
             }
@@ -189,8 +183,10 @@ final class AccountStore {
         struct State: Decodable { let installed: Bool }
         async let hook = try? bridgeOutput(["hook", "status"])
         async let shell = try? bridgeOutput(["shell", "status"])
+        async let live = try? bridgeOutput(["live", config.liveLimits == false ? "status" : "on"])
         if let data = await hook { limitHook = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
         if let data = await shell { shellSwitching = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
+        if let data = await live { liveLimits = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
         if let data = try? await bridgeOutput(["fable", "status"]) { fableToOpus = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
         if let data = try? await bridgeOutput(["fallback", "status"]) { opusFallback = (try? JSONDecoder().decode(State.self, from: data))?.installed ?? false }
     }
@@ -237,7 +233,31 @@ final class AccountStore {
         guard !held else { return }
         config.step(offset); persist()
     }
-    func toggleSmart() { config.smartMode.toggle(); persist() }
+    func toggleSmart() {
+        config.smartMode.toggle(); persist()
+        // Autopilot moves Terminal's account, which needs the shell line; turning it on is the consent.
+        if config.smartMode && !shellSwitching && !isDemo { Task { await setShellSwitching(true) } }
+    }
+    /// Opens a Terminal window that stays on this account, whatever Autopilot does elsewhere.
+    func openTerminal(_ id: String) async {
+        guard let account = config.accounts.first(where: { $0.id == id }), !isDemo else { return }
+        if !shellSwitching { await setShellSwitching(true) }
+        await refreshActive()  // writes the per-account pins
+        let pin = Self.pinName(account.name)
+        let url = root.appendingPathComponent("runtime/open-\(pin).command")
+        let script = "#!/bin/zsh\nexport SIDE_A_PIN=\(Shell.quote(pin))\nclear\necho \(Shell.quote("This terminal stays on \(account.name). Run claude as usual; sidea auto follows Side A again."))\nexec zsh -l\n"
+        do {
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+            NSWorkspace.shared.open(url)
+        } catch { self.error = "Terminal could not be opened: \(error.localizedDescription)" }
+    }
+    /// Matches the bridge's pin_name: lowercased, anything else becomes a dash.
+    static func pinName(_ name: String) -> String {
+        let slug = name.lowercased().map { $0.isASCII && ($0.isLetter || $0.isNumber) ? String($0) : "-" }.joined()
+            .split(separator: "-").joined(separator: "-")
+        return slug.isEmpty ? "account" : slug
+    }
     func setAuto(_ id: String, _ allowed: Bool) {
         guard let index = config.accounts.firstIndex(where: { $0.id == id }) else { return }
         config.accounts[index].allowAuto = allowed; persist()
@@ -331,7 +351,8 @@ final class AccountStore {
             }
             config.accounts[index].email = status.email
             config.accounts[index].ready = true
-            return persist()
+            let saved = persist()
+            return saved
         } catch {
             // A timeout or unavailable CLI does not prove a previously verified login expired.
             if reportError { self.error = error.localizedDescription }
@@ -367,11 +388,20 @@ final class AccountStore {
     func activate(_ id: String) async {
         guard let account = config.accounts.first(where: { $0.id == id }), !isActive(account) else { return }
         guard !isDemo else { activeIDs[account.provider] = id; return }
+        // Use means "run claude as this account", which only the shell line makes true.
+        if account.provider == .claude && !shellSwitching { await setShellSwitching(true) }
         do {
             _ = try await bridgeOutput(["activate", id])
             selectionGeneration += 1
             activeIDs[account.provider] = id
         } catch { self.error = error.localizedDescription }
+    }
+    /// Trades the login in `slot` with `to`'s, so every session reading it continues as `to`; see bridge swap().
+    private func swap(_ slot: String, _ to: String) async -> Bool {
+        guard (try? await bridgeOutput(["swap", slot, to], timeout: 90)) != nil else { return false }
+        selectionGeneration += 1
+        _ = await refreshActive()
+        return true
     }
     /// Keeps the Mac's existing login as a library account so switching never loses it.
     func adoptMacLogin(_ provider: AgentProvider) async {
@@ -392,43 +422,48 @@ final class AccountStore {
     func refreshUsage(_ id: String) async {
         guard Date() >= (backoffUntil[id] ?? .distantPast), !reading.contains(id) else { return }
         reading.insert(id); defer { reading.remove(id) }
-        usageAt[id] = Date()
+        let started = Date()
+        usageAt[id] = started
         do {
-            let value = try JSONDecoder().decode(AccountUsage.self, from: try await bridgeOutput(["usage", id]))
-            usage[id] = value
-            failing.remove(id); failingSince[id] = nil; readAt[id] = Date(); replacedNotified.remove(id); idle.remove(id)
-            let now = Date().timeIntervalSince1970
-            if let five = value.fiveHour {
-                // A drop means the window reset; the old pace no longer applies.
-                if let last = samples[id]?.last, five.percent < last.1 { samples[id] = [] }
-                samples[id, default: []].append((now, five.percent))
-                samples[id]?.removeAll { now - $0.0 > 1200 }
+            var value = try JSONDecoder().decode(AccountUsage.self, from: try await bridgeOutput(["usage", id]))
+            // A session reply that landed while this read was in flight is newer than its answer.
+            if (liveAt[id] ?? 0) > started.timeIntervalSince1970, let current = usage[id] {
+                for window in current.windows where ["five_hour", "seven_day"].contains(window.id) {
+                    if let index = value.windows.firstIndex(where: { $0.id == window.id }) { value.windows[index] = window }
+                }
             }
+            warnAboutPaidUsage(id, before: usage[id], after: value)
+            usage[id] = value
+            readAt[id] = max(started, readAt[id] ?? started)
+            failing.remove(id)
+            issues[id] = nil
+            sample(id, value.fiveHour, at: started.timeIntervalSince1970)
         } catch {
             let message = error.localizedDescription
             // Idle: nobody has used the login since it expired, so the last reading still holds.
             if message.contains("idle") {
                 backoffUntil[id] = Date().addingTimeInterval(1800)
-                // Nobody has used the login since it expired, so its usage can't have grown: the last
-                // reading is current. Without this an unused account, the best place to move a session,
-                // looked stale and was never used as a target.
-                if usage[id] != nil { readAt[id] = Date(); idle.insert(id) }
+                issues[id] = "idle"
+                // Free: Claude Code renews the login without running a model, then it is read again.
+                if Date().timeIntervalSince(renewedAt[id] ?? .distantPast) > 600 { Task { await renew(id) } }
             } else {
                 // The usage endpoint rate-limits frequent reads; back off rather than retry.
                 let signIn = message.contains("Sign in")
+                // A rate limit is not a fault: the last reading stays, marked with its time once it ages.
+                issues[id] = signIn ? "signIn" : message.contains("confirm whose login") ? "verify" : message.contains("429") ? nil : "offline"
                 backoffUntil[id] = Date().addingTimeInterval(signIn ? 1800 : message.contains("429") ? 600 : 300)
-                failing.insert(id); idle.remove(id)
-                if failingSince[id] == nil { failingSince[id] = Date() }
+                if !message.contains("429") { failing.insert(id) }
                 if signIn { usage[id]?.stale = true }
-                if message.contains("belongs to another account"), !replacedNotified.contains(id),
-                   let name = config.accounts.first(where: { $0.id == id })?.name {
-                    replacedNotified.insert(id)
-                    notify("\(name)'s login was replaced",
-                           "A session using \(name) signed in to a different account with /login. In Side A, open Accounts and choose Sign in again for \(name).")
-                }
             }
         }
         saveUsageCache()
+    }
+    private func sample(_ id: String, _ five: UsageWindow?, at now: Double) {
+        guard let five else { return }
+        // A drop means the window reset; the old pace no longer applies.
+        if let last = samples[id]?.last, five.percent < last.1 { samples[id] = [] }
+        samples[id, default: []].append((now, five.percent))
+        samples[id]?.removeAll { now - $0.0 > 1200 }
     }
     /// Refreshes what is due (menu open). The refresh button passes `force` but still
     /// respects backoff and never re-reads an account checked in the last minute.
@@ -439,56 +474,96 @@ final class AccountStore {
         await refresh(config.accounts.filter { $0.ready
             && (dueForRead($0) || (force && Date().timeIntervalSince(usageAt[$0.id] ?? .distantPast) > 60)) }.map(\.id))
     }
-    /// What Autopilot may act on: accounts with a trustworthy latest reading, plus any account a
-    /// running session just hit a limit on (its own error is proof, even while reads are failing).
-    private var plannable: [String: AccountUsage] {
-        // A failed read keeps its last good reading for 30 minutes; a 429 says nothing about the limits.
-        var value = usage.filter { !failing.contains($0.key) || Date().timeIntervalSince(readAt[$0.key] ?? .distantPast) < 1800 }
-        for (id, evidence) in limitEvidence { value[id] = evidence }
-        return value
-    }
-    /// Accounts with a limit a session reported hitting after the account's last successful reading.
-    private var limitEvidence: [String: AccountUsage] {
-        let now = Date().timeIntervalSince1970
-        var result: [String: AccountUsage] = [:]
-        for session in sessions {
-            guard let id = session.accountID, let limit = session.limitHit, let at = session.limitAt else { continue }
-            result[id] = Planner.withEvidence(result[id] ?? usage[id], limit: limit, at: at,
-                                              readAt: readAt[id]?.timeIntervalSince1970 ?? 0, now: now)
+    /// Paid usage starts silently once a plan limit is hit. Warns when this month's spend grows,
+    /// and once per limit when the account in use nears a limit with nowhere to move.
+    private func warnAboutPaidUsage(_ id: String, before: AccountUsage?, after: AccountUsage) {
+        guard let extra = after.extra, let name = config.accounts.first(where: { $0.id == id })?.name else { return }
+        if let previous = before?.extra?.used, extra.used > previous + 0.004 {
+            notify("\(name) is using paid credits", "\(extra.money(extra.used - previous)) more since the last check; \(extra.summary).")
+            return
         }
-        return result
+        guard extra.enabled, activeIDs[.claude] == id else { return }
+        let now = Date().timeIntervalSince1970
+        guard let near = [after.fiveHour, after.weekly].compactMap({ $0 }).first(where: { $0.percent >= 90 && ($0.resetsAt ?? 0) > now }),
+              paidWarned[id] != near.resetsAt else { return }
+        let others = config.accounts.filter { $0.provider == .claude && $0.id != id }
+        guard Planner.best(others, usage: planning(usage), active: nil, now: now) == nil else { return }
+        paidWarned[id] = near.resetsAt
+        notify("\(name) will start charging soon", "It is at \(Int(near.percent))% of its \(near.label.lowercased()) limit and no other account has room. Past the limit, Claude bills paid credits (\(extra.summary)).")
     }
+    /// Why an account shows no current numbers, in words; nil when its reading is current.
+    func issueText(_ id: String) -> String? {
+        switch issues[id] {
+        case "signIn": "Sign in again"
+        case "idle": usage[id] == nil ? "Renewing its login…"
+            : "As of \((readAt[id] ?? Date()).formatted(date: .omitted, time: .shortened)) · renewing"
+        case nil where (loginEnds[id] ?? .infinity) - Date().timeIntervalSince1970 < 3 * 86_400:
+            "Sign-in ends \(UsageBar.format(loginEnds[id]!)) · sign in again"
+        case "verify": "Checking whose login this is · retrying \(UsageBar.format((backoffUntil[id] ?? Date()).timeIntervalSince1970))"
+        case nil where usage[id] != nil && Date().timeIntervalSince(readAt[id] ?? .distantPast) > 900:
+            "As of \((readAt[id] ?? Date()).formatted(date: .omitted, time: .shortened))"
+        case "offline": "Couldn't connect · retrying \(UsageBar.format((backoffUntil[id] ?? Date()).timeIntervalSince1970))"
+        default: nil
+        }
+    }
+    /// Has Claude Code renew an idle login (no model runs, no quota), then reads it again.
+    func renew(_ id: String) async {
+        guard !waking.contains(id) else { return }
+        waking.insert(id); defer { waking.remove(id) }
+        renewedAt[id] = Date()
+        do {
+            _ = try await bridgeOutput(["renew", id], timeout: 120)
+            backoffUntil[id] = nil
+            await refreshUsage(id)
+        } catch {
+            let message = error.localizedDescription
+            if message.contains("Sign in") { issues[id] = "signIn"; usage[id]?.stale = true; saveUsageCache() }
+        }
+    }
+    func wake(_ id: String) async {
+        renewedAt[id] = nil
+        await renew(id)
+        if issues[id] == "idle" { self.error = "\(config.accounts.first { $0.id == id }?.name ?? "This account") could not be renewed. Sign in to it again." }
+    }
+    /// What Autopilot may act on: accounts with a trustworthy latest reading.
+    private var plannable: [String: AccountUsage] { usage.filter { !failing.contains($0.key) } }
+    /// True while Claude Code is running Fable and Autopilot follows it.
+    var fableMode: Bool { config.followFable != false && claudeModel?.localizedCaseInsensitiveContains("fable") == true }
+    /// Usage as Autopilot ranks Claude accounts: through the Fable cap while Fable is in use.
+    func planning(_ values: [String: AccountUsage]) -> [String: AccountUsage] { fableMode ? values.compactMapValues(\.forFable) : values }
+    func setFollowFable(_ value: Bool) { config.followFable = value; persist() }
+    func setSwapAt(_ value: Double) { config.swapAt = value; persist() }
     private struct UsageCache: Codable {
         var usage: [String: AccountUsage]; var at: [String: Date]
         var backoff: [String: Date]?; var primed: [String: Date]?
-        var active: [String: String]?; var failing: [String]?
-        var modelLimits: Bool?
-        var readAt: [String: Date]?
+        var active: [String: String]?; var failing: [String]?; var issues: [String: String]?; var readAt: [String: Date]?
     }
     private var reportURL: URL { root.appendingPathComponent("runtime/report.json") }
     private var usageCacheURL: URL { root.appendingPathComponent("runtime/usage-cache.json") }
     private func saveUsageCache() {
         try? PrivateFile.write(UsageCache(usage: usage, at: usageAt, backoff: backoffUntil, primed: primedAt,
                                           active: Dictionary(uniqueKeysWithValues: activeIDs.map { ($0.key.rawValue, $0.value) }),
-                                          failing: Array(failing), modelLimits: true, readAt: readAt),
+                                          failing: Array(failing), issues: issues, readAt: readAt),
                                to: usageCacheURL)
     }
-    /// Active accounts change fastest, then accounts running sessions (a session keeps the account it
-    /// started on). An idle account at a limit is read hourly rather than every 10 minutes: limits can
-    /// reset early (a free reset, or a weekly reset), so it is never left unread until its reset time.
+    /// Active accounts change fastest. An idle account at a limit cannot change until that
+    /// limit resets, so it is not read again before then.
     private func dueForRead(_ account: Account) -> Bool {
         let now = Date().timeIntervalSince1970
-        let inUse = isActive(account) || sessions.contains { $0.accountID == account.id }
-        let limited = usage[account.id].map { value in
-            !value.stale && ([value.fiveHour].compactMap({ $0 }) + value.weeklyLimits)
-                .contains { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now }
-        } ?? false
-        let interval: TimeInterval = isActive(account) ? (nearLimit(account.id) ? 60 : 120)
-            : inUse ? 300 : limited ? 3600 : 600
+        if !isActive(account), let value = usage[account.id], !value.stale,
+           let reset = [value.fiveHour, value.weekly].compactMap({ $0 }).filter({ $0.percent >= Planner.limited }).compactMap(\.resetsAt).max(),
+           reset > now {
+            return false
+        }
+        // The usage endpoint rate-limits a login read every minute or two; three minutes stays clear.
+        // While sessions report live limits, the endpoint is only needed for what they can't see
+        // (Fable, paid usage, use on other devices).
+        let live = now - (liveAt[account.id] ?? 0) < 600
+        let interval: TimeInterval = live ? 900 : isActive(account) ? (nearLimit(account.id) ? 90 : 180) : 600
         return Date().timeIntervalSince(usageAt[account.id] ?? .distantPast) >= interval - 1
     }
     /// Minutes until the account's 5-hour limit at its recent pace.
-    func minutesToLimit(_ id: String) -> Double? { Planner.minutesToLimit(samples[id] ?? []) }
+    func minutesToLimit(_ id: String) -> Double? { Planner.minutesToLimit(samples[id] ?? [], now: Date().timeIntervalSince1970) }
     private func nearLimit(_ id: String) -> Bool {
         (usage[id]?.fiveHour?.percent ?? 0) >= 85 || (minutesToLimit(id) ?? .infinity) < 15
     }
@@ -497,7 +572,7 @@ final class AccountStore {
         Self.post(title, body)
     }
     /// Nonisolated: the authorization callback runs on a background queue, and a closure formed in
-    /// this main-actor class would trap there under Swift 6's isolation checks.
+    /// this main-actor class would trap there under Swift 6's isolation checks (it crash-looped the app).
     private nonisolated static func post(_ title: String, _ body: String) {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert]) { granted, _ in
@@ -509,17 +584,44 @@ final class AccountStore {
     }
     @discardableResult private func refreshActive() async -> Bool {
         let generation = selectionGeneration
-        struct Active: Decodable { let accountID: String?; let email: String; let codexAccountID: String?; let codexEmail: String; let logins: [String: Double]? }
+        struct Active: Decodable { let accountID: String?; let email: String; let codexAccountID: String?; let codexEmail: String; let claudeModel: String?; let logins: [String: Double]?; let loginEnds: [String: Double]?; let live: [String: Live]?; let busy: [Busy]? }
+        struct Busy: Decodable { let slot: String; let account: String? }
+        struct Live: Decodable { let at: Double; let windows: [UsageWindow] }
         guard let data = try? await bridgeOutput(["active"]), let value = try? JSONDecoder().decode(Active.self, from: data) else { return false }
         guard generation == selectionGeneration else { return false }
         activeIDs = [.claude: value.accountID, .codex: value.codexAccountID].compactMapValues { $0 }
-        // From upstream 0.5.16: a login that changed (signed in again, or refreshed by Claude Code)
-        // is read now; the back-off and any old failure belonged to the previous login.
+        claudeModel = value.claudeModel
+        // A login that changed (signed in again, or refreshed by Claude Code) is read now:
+        // the back-off and any old reading belonged to the previous login.
         for (id, stamp) in value.logins ?? [:] {
             if let seen = loginStamps[id], seen != stamp {
-                backoffUntil[id] = nil; usageAt[id] = nil; failing.remove(id); failingSince[id] = nil
+                backoffUntil[id] = nil; usageAt[id] = nil; issues[id] = nil; failing.remove(id)
             }
             loginStamps[id] = stamp
+        }
+        loginEnds = (value.loginEnds ?? [:]).mapValues { $0 / 1000 }
+        busyLogins = value.busy.map { Dictionary($0.compactMap { busy in busy.account.map { (busy.slot, $0) } }, uniquingKeysWith: { a, _ in a }) }
+        // Each reply's limits, as a session saw them: newer than the last endpoint read wins.
+        var changed = false
+        for (id, live) in value.live ?? [:] { liveAt[id] = live.at }
+        for (id, live) in value.live ?? [:] where live.at > (readAt[id]?.timeIntervalSince1970 ?? 0) {
+            var merged = usage[id] ?? AccountUsage(windows: [])
+            for window in live.windows {
+                if let index = merged.windows.firstIndex(where: { $0.id == window.id }) { merged.windows[index] = window } else { merged.windows.append(window) }
+            }
+            merged.stale = false
+            usage[id] = merged
+            readAt[id] = Date(timeIntervalSince1970: live.at)
+            if issues[id] == "offline" || issues[id] == "idle" { issues[id] = nil; failing.remove(id) }
+            sample(id, live.windows.first { $0.id == "five_hour" }, at: live.at)
+            changed = true
+        }
+        if changed { saveUsageCache() }
+        for (id, end) in loginEnds where end - Date().timeIntervalSince1970 < 3 * 86_400 && endWarned[id] != end {
+            endWarned[id] = end
+            if let name = config.accounts.first(where: { $0.id == id })?.name {
+                notify("Sign in to \(name) again soon", "Its sign-in ends \(UsageBar.format(end)). Signing in again keeps its limits readable and Autopilot using it.")
+            }
         }
         unknownLogins = [.claude: value.accountID == nil ? value.email : "", .codex: value.codexAccountID == nil ? value.codexEmail : ""]
             .filter { !$0.value.isEmpty }
@@ -541,6 +643,26 @@ final class AccountStore {
             shellSwitching = try JSONDecoder().decode(State.self, from: data).installed
         } catch { self.error = error.localizedDescription }
     }
+    func setLiveLimits(_ enabled: Bool) async {
+        struct State: Decodable { let installed: Bool }
+        config.liveLimits = enabled; persist()
+        do {
+            let data = try await bridgeOutput(["live", enabled ? "on" : "off"])
+            liveLimits = try JSONDecoder().decode(State.self, from: data).installed
+        } catch { self.error = error.localizedDescription }
+    }
+    // MARK: Fork additions: running-session view, manual session actions, Fable fallback.
+
+    /// Every account's Fable limit is spent, so new commands resolve `fable` to Opus.
+    var fableToOpus = false
+    /// Opt-in `fallbackModel` in Claude Code's settings.
+    var opusFallback = false
+    var sessions: [LiveSession] = []
+    /// Sessions Side A is typing into right now.
+    var actingOn: Set<Int> = []
+    @ObservationIgnored private var stuckNotified: Set<Int> = []
+    @ObservationIgnored private var limitReported: [Int: Double] = [:]
+
     func setOpusFallback(_ enabled: Bool) async {
         struct State: Decodable { let installed: Bool }
         do {
@@ -558,14 +680,13 @@ final class AccountStore {
         }
     }
     enum SessionAction: String { case opus, move, focus, rescue, opusContinue = "opus-continue" }
-    /// Types into the session's Ghostty tab: `/model opus`, `/exit` and a resume on the current
-    /// account, or for a rescue Esc first and `continue` after. Returns the failure, if any.
-    @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true, automatic: Bool = false) async -> String? {
+    /// Types into the session's Ghostty tab, by hand from the menu: `/model opus`, `/exit` and a
+    /// resume on the current account, or bringing its tab to the front. Returns the failure, if any.
+    @discardableResult func act(on pid: Int, _ action: SessionAction, reportError: Bool = true) async -> String? {
         guard !isDemo, !actingOn.contains(pid) else { return "Already working on this session." }
         actingOn.insert(pid); defer { actingOn.remove(pid) }
-        // Above the bridge's own worst case (its waits plus several Ghostty calls), so it is never cut off mid-move.
         let timeout: TimeInterval = action == .rescue ? 600 : action == .focus ? 60 : 420
-        do { _ = try await bridgeOutput(["session", String(pid), action.rawValue] + (automatic ? ["--auto"] : []), timeout: timeout) }
+        do { _ = try await bridgeOutput(["session", String(pid), action.rawValue], timeout: timeout) }
         catch {
             if reportError { self.error = error.localizedDescription }
             return error.localizedDescription
@@ -574,120 +695,9 @@ final class AccountStore {
         await refreshSessions()
         return nil
     }
-    /// Opt-in, on by default: a session stuck mid-turn on a spent limit is pressed Esc, moved to an
-    /// account with room, and told to continue, instead of waiting for you.
-    var rescueStuckSessions = UserDefaults.standard.object(forKey: "sidea.rescueStuck") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(rescueStuckSessions, forKey: "sidea.rescueStuck") }
-    }
-    /// A reading Autopilot may act on: read in the last 10 minutes and not failing.
-    private func trusted(_ id: String) -> AccountUsage? {
-        if let evidence = limitEvidence[id] { return evidence }
-        // An idle account can't have used anything since its last reading, however long ago that was.
-        if idle.contains(id), !failing.contains(id), !sessions.contains(where: { $0.accountID == id }) { return usage[id] }
-        guard !failing.contains(id), Date().timeIntervalSince(readAt[id] ?? .distantPast) < 600 else { return nil }
-        return usage[id]
-    }
-    /// The account new commands use, when it has room for this session.
-    private func roomyTarget(for session: LiveSession, now: Double) -> String? {
-        guard shellSwitching, let target = activeIDs[.claude], target != session.accountID,
-              let value = trusted(target), !value.stale, !Planner.shouldLeave(value, onFable: session.onFable, now: now) else { return nil }
-        return target
-    }
-    private func rescueStuck(now: Double) async {
-        // A limit hit Side A won't act on (a shell command may be running, or there is no tab): say so once.
-        for session in sessions where session.limitHit != nil && (session.status == "shell" || !session.restartable || cannotRestart.contains(session.pid)) {
-            guard let at = session.limitAt, now - at < 1800, (limitReported[session.pid] ?? 0) < at - 3600 || limitReported[session.pid] == nil
-            else { continue }
-            limitReported[session.pid] = at
-            let account = config.accounts.first { $0.id == session.accountID }?.name ?? "its account"
-            notify("\(session.name ?? "A session") hit its \(session.limitHit ?? "") limit",
-                   session.inTerminal
-                       ? "It's on \(account) and has commands running that a restart would kill, so Side A won't exit it. Type /login in its tab and sign in to an account with room to switch without restarting."
-                       : "It's a headless job on \(account); it can't be moved. It will stop until the limit resets.")
-        }
-        guard rescueStuckSessions else { return }
-        // Any limit error qualifies here: the account must also read as exhausted below, so an old error
-        // on an account with room does nothing, and a fresh reading that confirms it doesn't delay it.
-        for session in sessions where session.restartable && !cannotRestart.contains(session.pid) && (session.limitHit != nil || session.looksStuck(now: now))
-            && session.status != "shell" && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
-            guard let id = session.accountID, let value = trusted(id),
-                  Planner.isExhausted(value, onFable: session.onFable, now: now) else { continue }
-            guard let target = roomyTarget(for: session, now: now) else {
-                // A Fable limit with no Fable left anywhere: carry on in Opus.
-                if session.limitHit == "fable", session.status == "idle", !switchedToOpus.contains(session.pid) {
-                    fixedAt[session.pid] = Date()
-                    if let failure = await act(on: session.pid, .opusContinue, reportError: false, automatic: true) {
-                        notify("Couldn't switch \(session.name ?? "a session") to Opus", failure)
-                    } else {
-                        switchedToOpus.insert(session.pid)
-                        notify("Switched \(session.name ?? "a session") to Opus", "It hit its Fable limit and no account has Fable left; it continued in Opus.")
-                    }
-                }
-                continue
-            }
-            fixedAt[session.pid] = Date()
-            let name = session.name ?? "A session"
-            let account = config.accounts.first { $0.id == target }?.name ?? "another account"
-            if let failure = await act(on: session.pid, .rescue, reportError: false, automatic: true) {
-                if failure.contains("background work") { cannotRestart.insert(session.pid) }
-                notify("Couldn't rescue \(name)", failure)
-            } else {
-                notify("Rescued \(name)", "Its account ran out, so it moved to \(account) and continued where it stopped.")
-            }
-        }
-    }
-    /// Moves idle sessions off an account before it runs out: once a limit the session depends on
-    /// reaches 90%, to the account new commands use if that one has room for it. A Fable session with
-    /// nowhere to go is switched to Opus once its Fable is nearly spent. Busy sessions are never
-    /// interrupted. Each session is tried once per 10 minutes.
-    private func fixSessions(fableSpentEverywhere: Bool) async {
-        guard fixFableSessions else { return }
-        let now = Date().timeIntervalSince1970
-        // Turn over but still "busy" (background tasks): /exit would kill that work, so say it once instead.
-        for session in sessions where session.inTerminal && ((session.status == "busy" && session.turnEnded == true) || (session.runningJobs ?? 0) > 0) {
-            guard let id = session.accountID, moveSuggested[session.pid] != id, let value = trusted(id),
-                  Planner.shouldLeave(value, onFable: session.onFable, now: now),
-                  let target = roomyTarget(for: session, now: now) else { continue }
-            moveSuggested[session.pid] = id
-            let from = config.accounts.first { $0.id == id }?.name ?? "Its account"
-            let to = config.accounts.first { $0.id == target }?.name ?? "another account"
-            notify("Move \(session.name ?? "a session") to \(to)?",
-                   (session.runningJobs ?? 0) > 0
-                       ? "\(from) is close to a limit, and the session has commands running that a restart would kill. Type /login in its tab and sign in as \(to) to switch without restarting."
-                       : "\(from) is close to a limit, but the session has background work running, so Side A won't exit it. When that work is done, /exit and run claude -c in its tab.")
-        }
-        for session in sessions where session.restartable && !cannotRestart.contains(session.pid) && session.status == "idle" && !freshLimit(session)
-            && Date().timeIntervalSince(fixedAt[session.pid] ?? .distantPast) > 600 {
-            guard let id = session.accountID, let value = trusted(id),
-                  Planner.shouldLeave(value, onFable: session.onFable, now: now) else { continue }
-            let target = roomyTarget(for: session, now: now)
-            // Already switched to Opus: its last reply stays Fable until the next turn, so don't repeat it.
-            let fableOnly = session.onFable && !Planner.shouldLeave(value, onFable: false, now: now) && !switchedToOpus.contains(session.pid)
-            guard target != nil || fableOnly else { continue }
-            fixedAt[session.pid] = Date()
-            let name = session.name ?? "A session"
-            let from = config.accounts.first { $0.id == id }?.name ?? "Its account"
-            if let failure = await act(on: session.pid, target != nil ? .move : .opus, reportError: false, automatic: true) {
-                if failure.contains("background work") { cannotRestart.insert(session.pid) }
-                notify("Couldn't move \(name)", failure)
-            } else if let target {
-                let account = config.accounts.first { $0.id == target }?.name ?? "another account"
-                notify("Moved \(name) to \(account)", "\(from) is close to a limit; the conversation continues where it was.")
-            } else {
-                switchedToOpus.insert(session.pid)
-                notify("Switched \(name) to Opus", "\(from) is nearly out of Fable and no account has Fable to spare.")
-            }
-        }
-    }
     func fableSpent(_ accountID: String?) -> Bool {
         let now = Date().timeIntervalSince1970
-        return accountID.flatMap { usage[$0]?.fable }.map { $0.percent >= Planner.full && ($0.resetsAt ?? 0) > now } ?? false
-    }
-    /// The session's limit error is newer than its account's latest reading. An older one (say, from
-    /// an account it was on before a /login) is history: the reading decides.
-    func freshLimit(_ session: LiveSession) -> Bool {
-        guard session.limitHit != nil, let at = session.limitAt, let id = session.accountID else { return false }
-        return at > (readAt[id]?.timeIntervalSince1970 ?? 0)
+        return accountID.flatMap { usage[$0]?.fable }.map { $0.percent >= Planner.limited && ($0.resetsAt ?? 0) > now } ?? false
     }
     /// Waiting on you, or busy far too long, on an account where a limit it needs is spent.
     func isStuck(_ session: LiveSession) -> Bool {
@@ -699,22 +709,39 @@ final class AccountStore {
         guard !isDemo, let data = try? await bridgeOutput(["sessions"]),
               let value = try? JSONDecoder().decode([LiveSession].self, from: data) else { return }
         if value != sessions { sessions = value }
-        // Side A never answers that prompt (one choice buys usage credits); it tells you instead.
+        let name = { (id: String?) in self.config.accounts.first { $0.id == id }?.name ?? "its account" }
+        // Side A never answers Claude Code's limit prompt (one choice buys usage credits); it says so instead.
         let stuck = value.filter { isStuck($0) }
         for session in stuck where !stuckNotified.contains(session.pid) {
-            let account = config.accounts.first { $0.id == session.accountID }?.name ?? "Its account"
             notify("\(session.name ?? "A session") is stuck on a limit",
-                   session.onFable ? "\(account) is out of usage for it. In its Ghostty tab, choose Switch to … and continue, or press Esc and move it."
-                                   : "\(account) is out of usage. Press Esc in its Ghostty tab, then move it from the Side A menu.")
+                   "\(name(session.accountID)) is out of usage for it. Autopilot trades its login to an account with room within a minute; then press Esc in its tab and type continue.")
         }
         stuckNotified = Set(stuck.map(\.pid))
+        // A limit error ends the turn: once the login has moved, the session only needs "continue".
+        let now = Date().timeIntervalSince1970
+        for session in value where session.limitHit != nil {
+            guard let at = session.limitAt, now - at < 1800, limitReported[session.pid] != at else { continue }
+            limitReported[session.pid] = at
+            notify("\(session.name ?? "A session") hit its \(session.limitHit ?? "") limit",
+                   "Autopilot moves its login to an account with room. Once it has, type continue in its tab.")
+        }
     }
+
     func setLimitHook(_ enabled: Bool) async {
         struct State: Decodable { let installed: Bool }
         do {
             let data = try await bridgeOutput(["hook", enabled ? "on" : "off"])
             limitHook = try JSONDecoder().decode(State.self, from: data).installed
         } catch { self.error = error.localizedDescription }
+    }
+    /// True when a session reported new limits, at most every 15 s, so a trade happens
+    /// between replies rather than up to a minute later.
+    private func liveChanged() -> Bool {
+        let url = root.appendingPathComponent("runtime/live")
+        guard let date = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date,
+              date > liveSeen, Date().timeIntervalSince(liveSeen) > 15 else { return false }
+        liveSeen = Date()
+        return true
     }
     /// True once per touch of the marker the opt-in StopFailure hook writes on a rate limit.
     private func limitHit() -> Bool {
@@ -741,40 +768,57 @@ final class AccountStore {
         let now = Date().timeIntervalSince1970
         // Codex: the desktop app keeps its own copy of the login, and OpenAI revokes a login
         // whose refresh token is used twice, so Codex is never switched automatically.
-        for provider in [AgentProvider.claude] where unknownLogins[provider] == nil && shellSwitching {
+        for provider in [AgentProvider.claude] where unknownLogins[provider] == nil {
             let accounts = config.accounts.filter { $0.provider == provider }
             let current = activeIDs[provider]
-            var pick = Planner.pick(accounts, usage: plannable, active: current, now: now)
-            // Fable counts as spent everywhere only when every account's Fable is known to be spent;
-            // an account Side A can't read right now may well have Fable left.
+            let plannable = planning(self.plannable)
+            // Fable spent on every account (known, not merely unreadable): new commands use Opus for Fable.
             let fableMaybeLeft = accounts.contains { account in
                 account.ready && account.allowAuto
                     && !(plannable[account.id].map { Planner.isSpent($0, onFable: false, now: now) } ?? false)
-                    && (usage[account.id]?.fable.map { $0.percent < Planner.full || ($0.resetsAt ?? 0) <= now } ?? true)
-                    && plannable[account.id]?.fable.map({ $0.percent < Planner.full || ($0.resetsAt ?? 0) <= now }) != false
+                    && (usage[account.id]?.fable.map { $0.percent < Planner.limited || ($0.resetsAt ?? 0) <= now } ?? true)
             }
-            if pick.fableSpent && fableMaybeLeft { pick = (nil, false) }
-            await setFableToOpus(pick.fableSpent)
-            // A failed read is not evidence of a limit; only a signed-out active account moves.
-            if let current, failing.contains(current), usage[current]?.stale != true,
-               Date().timeIntervalSince(failingSince[current] ?? Date()) < 600 { continue }
-            // An account with Autopilot off is never switched away from automatically.
-            if let current, config.accounts.first(where: { $0.id == current })?.allowAuto == false { continue }
-            if let best = pick.id, best != current {
-                let from = config.accounts.first { $0.id == current }?.name
-                await activate(best)
-                if activeIDs[provider] == best, let name = config.accounts.first(where: { $0.id == best })?.name {
-                    notify("Switched to \(name)", from.map { "\($0) is near its limit or has less quota at risk." } ?? "Autopilot picked the account with the most quota at risk.")
+            await setFableToOpus(shellSwitching && !fableMaybeLeft)
+            let name = { (id: String) in self.config.accounts.first { $0.id == id }?.name ?? "" }
+            // Logins running sessions read, by slot. Unknown (processes can't be listed) means no
+            // trades; only new commands move.
+            var slots = busyLogins ?? [:]
+            let busy = { Set(slots.values).union([current].compactMap { $0 }) }
+            for slot in slots.keys.sorted(by: { slots[$0] == current && slots[$1] != current }) {
+                // Settings may have changed during the last trade.
+                guard config.smartMode, let id = slots[slot], let account = config.accounts.first(where: { $0.id == id }) else { continue }
+                // A failed read is not evidence of a limit; only a signed-out account moves.
+                if failing.contains(id), usage[id]?.stale != true { continue }
+                // An account with Autopilot off, or mid sign-in, is never moved automatically.
+                if !account.allowAuto || signingIn.contains(id) { continue }
+                // Trade only with an account no session is using, so no session lands on the full one.
+                let free = config.accounts.filter { $0.provider == provider && ($0.id == id || (!busy().contains($0.id) && !signingIn.contains($0.id))) }
+                guard let best = Planner.best(free, usage: plannable, active: id, now: now), best != id else { continue }
+                if await swap(slot, best) {
+                    slots[slot] = best
+                    notify("Now playing: \(name(best))", "\(name(id)) is near its limit. Its running sessions continue as \(name(best)) within a minute, nothing to restart.")
                 }
             }
-            if provider == .claude {
-                await fixSessions(fableSpentEverywhere: pick.fableSpent)
-                await rescueStuck(now: now)
+            // New commands: if the account they use is still full (no trade, or no sessions on it), point them elsewhere.
+            if config.smartMode, shellSwitching, let current = activeIDs[provider], !signingIn.contains(current),
+               config.accounts.first(where: { $0.id == current })?.allowAuto != false,
+               !(failing.contains(current) && usage[current]?.stale != true),
+               let best = Planner.best(config.accounts.filter { $0.provider == provider && ($0.id == current || !busy().contains($0.id)) },
+                                       usage: plannable, active: current, now: now), best != current {
+                await activate(best)
+                if activeIDs[provider] == best {
+                    notify("Now playing: \(name(best))", "\(name(current)) is near its limit. New claude commands use \(name(best)).")
+                }
             }
-            if provider == .claude, let next = Planner.nextAvailable(accounts, usage: plannable, now: now), Planner.best(accounts, usage: plannable, active: nil, now: now, ignoringModelLimits: true) == nil {
+            if config.smartMode, activeIDs[provider] == nil, shellSwitching, let best = Planner.best(accounts, usage: plannable, active: nil, now: now) {
+                await activate(best)
+            }
+            if provider == .claude, let next = Planner.nextAvailable(accounts, usage: plannable, now: now), Planner.best(accounts, usage: plannable, active: current, now: now) == nil {
                 if !exhaustedNotified {
                     exhaustedNotified = true
-                    notify("All Claude accounts are limited", "\(next.0.name) is back \(UsageBar.format(next.1)).")
+                    notify(fableMode ? "Fable is used up" : "All tracks played",
+                           fableMode ? "Every account has spent its Fable share. Switch to another model, or wait until \(UsageBar.format(next.1))."
+                                     : "\(next.0.name) is back \(UsageBar.format(next.1)).")
                 }
             } else if provider == .claude { exhaustedNotified = false }
         }
@@ -785,7 +829,9 @@ final class AccountStore {
             && Date().timeIntervalSince(primedAt[account.id] ?? .distantPast) > 1800 {
             primedAt[account.id] = Date()
             saveUsageCache()
-            if (try? await bridgeOutput(["prime", account.id], timeout: 200)) != nil { await refreshUsage(account.id) }
+            _ = try? await bridgeOutput(["prime", account.id], timeout: 200)
+            backoffUntil[account.id] = nil
+            await refreshUsage(account.id)
         }
     }
     func setMenuBarOnly(_ value: Bool) {

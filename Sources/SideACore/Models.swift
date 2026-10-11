@@ -43,6 +43,14 @@ public struct Configuration: Codable, Equatable, Sendable {
     /// Autopilot: switch the Mac-wide account and start idle 5-hour windows.
     public var smartMode = true
     public var menuBarOnly = true
+    /// Shares token totals with the user's other Macs through iCloud Drive. Nil means off.
+    public var sync: Bool?
+    /// While Claude Code runs Fable, Autopilot ranks accounts by Fable headroom. Nil means on.
+    public var followFable: Bool?
+    /// Live limits from Claude Code's statusline; nil means not yet decided (on by default).
+    public var liveLimits: Bool?
+    /// The 5-hour or weekly percentage at which Autopilot moves off an account. Nil means 95.
+    public var swapAt: Double?
     public init() {}
 
     public var selected: Account? { accounts.first { $0.id == selectedID } }
@@ -76,9 +84,25 @@ public struct UsageWindow: Codable, Equatable, Sendable {
     }
 }
 
+/// Paid usage past the plan's limits ("usage credits"), this month.
+public struct ExtraUsage: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var used: Double
+    public var limit: Double?
+    public var currency: String
+    public init(enabled: Bool, used: Double, limit: Double?, currency: String = "USD") {
+        self.enabled = enabled; self.used = used; self.limit = limit; self.currency = currency
+    }
+    public func money(_ value: Double) -> String { value.formatted(.currency(code: currency)) }
+    /// "$3.20 of $10 this month".
+    public var summary: String { "\(money(used))\(limit.map { " of \(money($0))" } ?? "") this month" }
+}
+
 public struct AccountUsage: Codable, Equatable, Sendable {
     public var windows: [UsageWindow]
     public var stale: Bool
+    /// Paid usage, Claude only; absent in readings from older versions.
+    public var extra: ExtraUsage?
     /// Relative plan size (Pro 1, Max 5x 5, Max 20x 20). Missing means unknown, treated as 1.
     public var capacity: Double?
     public init(windows: [UsageWindow], stale: Bool = false, capacity: Double? = nil) {
@@ -87,9 +111,27 @@ public struct AccountUsage: Codable, Equatable, Sendable {
     public var fiveHour: UsageWindow? { windows.first { $0.id == "five_hour" } }
     public var weekly: UsageWindow? { windows.first { $0.id == "seven_day" } }
     /// Fable's own weekly limit; when full it stops Fable sessions even with overall weekly room left.
-    public var fable: UsageWindow? { windows.first { $0.id == "seven_day_model:fable" } }
+    public var fable: UsageWindow? { windows.first { $0.id == "model:fable" } }
     /// The overall weekly limit and every model-scoped weekly limit; any full one stops work.
-    public var weeklyLimits: [UsageWindow] { windows.filter { $0.id == "seven_day" || $0.id.hasPrefix("seven_day_model:") } }
+    public var weeklyLimits: [UsageWindow] { windows.filter { $0.id == "seven_day" || $0.id.hasPrefix("model:") } }
+    /// Weekly caps that apply to one model only, such as "Weekly Fable".
+    public var modelLimits: [UsageWindow] { windows.filter { $0.id.hasPrefix("model:") } }
+
+    /// The account as Fable sees it. Fable may use half of the weekly limit, so its room is the
+    /// smaller of what is left of the Fable cap and twice what is left of the weekly limit.
+    /// Nil for a plan without a Fable cap, where Fable is billed as extra usage.
+    public var forFable: AccountUsage? {
+        // ponytail: assumes the Fable percent is of the Fable cap (100 = limited), like every other window.
+        let fable = windows.first { $0.id == "model:fable" }
+        // A Max plan whose usage lists no Fable cap yet has its whole Fable share left.
+        guard fable != nil || (capacity ?? 1) >= 5 else { return nil }
+        let room = min(100 - (fable?.percent ?? 0), 2 * (100 - (weekly?.percent ?? 0)))
+        var copy = self
+        copy.windows = windows.filter { $0.id != "seven_day" }
+            + [UsageWindow(id: "seven_day", label: "Weekly Fable", percent: max(100 - room, 0), resetsAt: fable?.resetsAt ?? weekly?.resetsAt)]
+        copy.capacity = (capacity ?? 1) / 2
+        return copy
+    }
 }
 
 /// A running Claude Code session: the model of its latest reply and the account it runs on.
@@ -133,7 +175,7 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-public struct TokenRow: Codable, Equatable, Sendable {
+public struct TokenRow: Codable, Hashable, Sendable {
     public var date: String?
     public var project: String?
     public var model: String?
@@ -161,9 +203,35 @@ public struct UsageReport: Codable, Equatable, Sendable {
     public var projects: [TokenRow]
     public var models: [TokenRow]
     public var activity: [ActivitySpan]
-    public init(days: [TokenRow], projects: [TokenRow], models: [TokenRow], activity: [ActivitySpan]) {
-        self.days = days; self.projects = projects; self.models = models; self.activity = activity
+    /// Each day split by model; absent in reports cached by older versions.
+    public var dayModels: [TokenRow]?
+    /// Macs sharing totals through sync, this one included; empty or absent without sync.
+    public var machines: [Machine]?
+    /// Accounts set up on another Mac but not on this one.
+    public var elsewhere: [RemoteAccount]?
+    public init(days: [TokenRow], projects: [TokenRow], models: [TokenRow], activity: [ActivitySpan], dayModels: [TokenRow]? = nil,
+                machines: [Machine]? = nil, elsewhere: [RemoteAccount]? = nil) {
+        self.days = days; self.projects = projects; self.models = models; self.activity = activity; self.dayModels = dayModels
+        self.machines = machines; self.elsewhere = elsewhere
     }
+}
+
+public struct Machine: Codable, Hashable, Sendable {
+    public var name: String
+    /// Tokens in the last seven days.
+    public var tokens: Int
+    public var updated: Double
+    public var current: Bool
+    public init(name: String, tokens: Int, updated: Double, current: Bool) {
+        self.name = name; self.tokens = tokens; self.updated = updated; self.current = current
+    }
+}
+
+public struct RemoteAccount: Codable, Hashable, Sendable {
+    public var name: String
+    public var email: String
+    public var provider: AgentProvider
+    public var machine: String
 }
 
 /// The user's usual working hours, learned from when transcripts show activity.
@@ -202,13 +270,93 @@ public struct WorkSchedule: Equatable, Sendable {
     }
 }
 
+/// When in the week the user works, from hourly activity over the last four weeks, so a
+/// weekly forecast follows their rhythm (quiet weekends, busy afternoons) rather than a straight line.
+public struct WeekRhythm: Sendable {
+    /// Average responses per [weekday 0...6, Sunday first][hour].
+    var weights: [[Double]]
+    let calendar: Calendar
+    var total: Double { weights.joined().reduce(0, +) }
+
+    public init?(_ activity: [ActivitySpan], calendar: Calendar = .current) {
+        let recent = activity.suffix(28)
+        guard recent.count >= 7 else { return nil }
+        var weights = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)
+        let parse = Date.ISO8601FormatStyle(timeZone: calendar.timeZone).year().month().day()
+        var days = Array(repeating: 0.0, count: 7)
+        for span in recent {
+            guard let date = try? parse.parse(span.date) else { continue }
+            let weekday = calendar.component(.weekday, from: date) - 1
+            days[weekday] += 1
+            for (hour, count) in span.hours.prefix(24).enumerated() { weights[weekday][hour] += Double(count) }
+        }
+        // Days without a span count as idle; every hour keeps a small floor so a rare hour is unlikely, not impossible.
+        let weeks = max(days.max() ?? 1, 1)
+        let sum = weights.joined().reduce(0, +) / weeks
+        guard sum > 0 else { return nil }
+        self.weights = weights.map { $0.map { $0 / weeks + sum / 168 * 0.05 } }
+        self.calendar = calendar
+    }
+
+    /// Expected share of a week's activity between two moments, at most one week apart.
+    public func share(from start: Double, to end: Double) -> Double {
+        var moment = start, sum = 0.0
+        while moment < end {
+            let date = Date(timeIntervalSince1970: moment)
+            let parts = calendar.dateComponents([.weekday, .hour, .minute, .second], from: date)
+            let next = min(end, moment + 3600 - Double((parts.minute ?? 0) * 60 + (parts.second ?? 0)))
+            sum += weights[(parts.weekday ?? 1) - 1][parts.hour ?? 0] * (next - moment) / 3600
+            moment = next
+        }
+        return sum / total
+    }
+
+    /// When cumulative activity from `start` reaches `fraction` of a week, searching up to `limit`.
+    public func moment(reaching fraction: Double, from start: Double, limit: Double) -> Double? {
+        var moment = start, sum = 0.0
+        while moment < limit {
+            let piece = share(from: moment, to: moment + 3600)
+            if sum + piece >= fraction { return moment + 3600 * (fraction - sum) / piece }
+            sum += piece; moment += 3600
+        }
+        return nil
+    }
+}
+
+/// A weekly window projected to its reset at the user's rhythm.
+public struct WeekForecast: Equatable, Sendable {
+    /// Expected percent used by the reset, uncapped.
+    public var projected: Double
+    /// Where usage would be now if the week followed the rhythm exactly, 0 to 1.
+    public var expectedNow: Double
+    /// When the limit is reached at this pace, if before the reset.
+    public var runsOut: Double?
+
+    public init?(_ window: UsageWindow, rhythm: WeekRhythm?, now: Double) {
+        guard let reset = window.resetsAt, reset > now else { return nil }
+        let start = reset - 7 * 86_400, used = min(max(window.percent, 0), 100)
+        let elapsed = rhythm?.share(from: start, to: now) ?? min(max((now - start) / (7 * 86_400), 0), 1)
+        expectedNow = elapsed
+        // Too early in the week to say anything about pace.
+        guard elapsed > 0.05, used > 0 else { projected = used; runsOut = nil; return }
+        projected = used / elapsed
+        guard projected >= 100 else { runsOut = nil; return }
+        let needed = (100 - used) / projected
+        runsOut = rhythm?.moment(reaching: needed, from: now, limit: reset) ?? (start + (now - start) * 100 / used)
+    }
+}
+
 /// Decides which account should hold the Mac-wide login, and which idle windows to start.
 /// Weekly quota is what expires unused, so the account that must burn quota fastest
 /// before its weekly reset goes first; among near-ties, the 5-hour window that resets
 /// soonest is used before it refills.
 public enum Planner {
-    public static let full = 97.0
-    public static let switchTarget = 90.0
+    /// Where Autopilot leaves an account; the app sets it from Settings.
+    nonisolated(unsafe) public static var full = 97.0
+    /// Where an account shows as limited.
+    public static let limited = 97.0
+    /// Autopilot moves only to an account below this; it follows a lower Move at setting.
+    public static var switchTarget: Double { min(90, full - 5) }
     static let week = 7 * 24 * 3600.0
 
     static func live(_ window: UsageWindow?, _ now: Double) -> UsageWindow? {
@@ -239,7 +387,7 @@ public enum Planner {
     public static func withEvidence(_ usage: AccountUsage?, limit: String, at: Double, readAt: Double, now: Double) -> AccountUsage {
         var value = usage ?? AccountUsage(windows: [])
         guard at > readAt else { return value }
-        let id = limit == "fable" ? "seven_day_model:fable" : limit == "weekly" ? "seven_day" : "five_hour"
+        let id = limit == "fable" ? "model:fable" : limit == "weekly" ? "seven_day" : "five_hour"
         // The reset isn't in the error; hold it for an hour, after which a fresh reading decides.
         let window = UsageWindow(id: id, label: id, percent: 100, resetsAt: now + 3600)
         if let index = value.windows.firstIndex(where: { $0.id == id }) {
@@ -293,11 +441,14 @@ public enum Planner {
     }
 
     /// Minutes until a window reaches the limit at the observed pace, from (time, percent) samples.
-    public static func minutesToLimit(_ samples: [(Double, Double)]) -> Double? {
+    /// Counts down from the last sample; samples older than ten minutes say nothing about the pace now.
+    public static func minutesToLimit(_ samples: [(Double, Double)], now: Double? = nil) -> Double? {
         guard let first = samples.first, let last = samples.last, last.0 - first.0 >= 300,
               last.1 > first.1, last.1 < full else { return nil }
+        let since = ((now ?? last.0) - last.0) / 60
+        guard since < 10 else { return nil }
         let perMinute = (last.1 - first.1) / ((last.0 - first.0) / 60)
-        return (full - last.1) / perMinute
+        return max((full - last.1) / perMinute - since, 0)
     }
 
     public static func best(_ candidates: [Account], usage: [String: AccountUsage], active: String?, now: Double,

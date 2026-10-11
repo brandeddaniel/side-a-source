@@ -46,4 +46,18 @@ class CodexTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'Sign in to B'): action(Path(d),b)
             self.assertEqual(cls.call_count,calls)
 
+    def test_a_revoked_login_asks_for_sign_in_instead_of_backing_off_forever(self):
+        # Codex reports a revoked login as "failed to fetch codex rate limits ... 401 token_revoked";
+        # reading that as a rate limit kept the account on "Reading..." indefinitely.
+        server='''import json,sys
+for line in sys.stdin:
+    request=json.loads(line)
+    if 'id' not in request: continue
+    if request['method']=='initialize': print(json.dumps({'id':request['id'],'result':{}}),flush=True)
+    else: print(json.dumps({'id':request['id'],'error':{'code':-32603,'message':'failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; body={"error":{"code":"token_revoked"}}'}}),flush=True)
+'''
+        with tempfile.TemporaryDirectory() as d:
+            with codex.RPC([sys.executable,'-c',server],dict(os.environ),d) as rpc:
+                with self.assertRaisesRegex(ValueError,'Sign in again'): rpc.call('account/rateLimits/read')
+
 if __name__ == '__main__': unittest.main()
