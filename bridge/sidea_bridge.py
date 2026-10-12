@@ -655,11 +655,12 @@ def slot_owner(root, config, slot):
     return account_for_email(config, token_email(root, read_secret(slot_service(root, slot))))
 
 
-def swap(root, config, slot, other):
+def swap(root, config, slot, other, share=False):
     """Moves every session reading `slot` to `other`'s login: the login in `slot` and `other`'s
     trade Keychain items. Running sessions re-read their item within about 30 s. Nothing is
     copied: a journal is saved first, and finish_swap() completes the trade from it, now or
-    after a crash."""
+    after a crash. `share` lets `other`'s own sessions continue on the login from `slot`; the app
+    asks for it only when that login still has room for every one of them."""
     if provider_of(other) != "claude":
         raise ValueError("Only Claude accounts trade logins.")
     if slot != "mac":
@@ -679,7 +680,7 @@ def swap(root, config, slot, other):
             # Checked last, right before the writes, not from the app's last look: a session started
             # meanwhile must not get the full login.
             busy = busy_slots(root, config)
-            if busy is None or target in busy:
+            if busy is None or (target in busy and not share):
                 raise ValueError("A session is using that account now.")
             read_secret.cache_clear()
             logins = [read_secret(slot_service(root, slot)), owned_login(root, other)]
@@ -1847,6 +1848,7 @@ def main():
     swap_command = commands.add_parser("swap")
     swap_command.add_argument("slot")
     swap_command.add_argument("account")
+    swap_command.add_argument("--share", action="store_true")
     commands.add_parser("active")
     commands.add_parser("report").add_argument("--sync", type=Path)
     commands.add_parser("hook").add_argument("state", choices=["on", "off", "status"])
@@ -1913,7 +1915,7 @@ def main():
                           "live": live_limits(root, config), "busy": busy_logins(root, config)}))
         return
     if args.command == "swap":
-        swap(root, config, args.slot, account_by_id(config, args.account))
+        swap(root, config, args.slot, account_by_id(config, args.account), share=args.share)
         return
     account = account_by_id(config, args.account)
     if args.command == "usage":

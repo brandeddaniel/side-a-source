@@ -483,6 +483,26 @@ export SIDE_A_PIN=studio; rm '%s'/studio; show
             self.assertTrue(lock.exists())  # a stale lock is taken over, and held while claude runs
         self.assertFalse(lock.exists())
 
+    def test_a_busy_login_trades_only_when_shared(self):
+        a=account('Alpha'); b=account('Beta'); config={'accounts':[a,b]}
+        login=lambda who: {'claudeAiOauth':{'accessToken':f'{who}-at','refreshToken':f'{who}-rt','expiresAt':(time.time()+3600)*1000}}
+        mac=bridge.GLOBAL_SERVICE; beta=bridge.profile_service(self.root,b['id'])
+        keychain={mac:login('alpha'), beta:login('beta')}
+        owner=lambda root,blob: ((blob or {}).get('claudeAiOauth') or {}).get('accessToken','').split('-')[0]+'@example.com' if blob else ''
+        reader=MagicMock(side_effect=lambda svc: keychain.get(svc)); reader.cache_clear=lambda: None
+        real_run=subprocess.run
+        def run(args,*rest,**kw):
+            if args[:2]==['security','delete-generic-password']: keychain.pop(args[-1],None); return subprocess.CompletedProcess(args,0)
+            return real_run(args,*rest,**kw)
+        home=self.root/'home'; (home/'.claude').mkdir(parents=True)
+        with patch.object(bridge,'read_secret',reader), patch.object(bridge,'write_secret',side_effect=lambda svc,blob: keychain.__setitem__(svc,blob)), \
+             patch.object(bridge,'token_email',side_effect=owner), patch.object(bridge,'mac_email',side_effect=lambda root: owner(root,keychain[mac])), \
+             patch.object(bridge.subprocess,'run',side_effect=run), patch.object(Path,'home',return_value=home), \
+             patch.object(bridge,'busy_slots',return_value={b['id']}):
+            with self.assertRaisesRegex(ValueError,'using that account'): bridge.swap(self.root,config,'mac',b)
+            bridge.swap(self.root,config,'mac',b,share=True)
+        self.assertEqual(keychain[mac]['claudeAiOauth']['refreshToken'],'beta-rt')
+        self.assertEqual(keychain[beta]['claudeAiOauth']['refreshToken'],'alpha-rt')
     def test_swapping_moves_logins_between_items_and_a_crash_finishes_forward(self):
         a=account('Alpha'); b=account('Beta'); config={'accounts':[a,b]}
         login=lambda who,n=1,exp=3600: {'claudeAiOauth':{'accessToken':f'{who}-at{n}','refreshToken':f'{who}-rt{n}','expiresAt':(time.time()+exp)*1000},'organizationUuid':who+'-org'}

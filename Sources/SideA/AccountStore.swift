@@ -397,11 +397,28 @@ final class AccountStore {
         } catch { self.error = error.localizedDescription }
     }
     /// Trades the login in `slot` with `to`'s, so every session reading it continues as `to`; see bridge swap().
-    private func swap(_ slot: String, _ to: String) async -> Bool {
-        guard (try? await bridgeOutput(["swap", slot, to], timeout: 90)) != nil else { return false }
+    private func swap(_ slot: String, _ to: String, share: Bool = false) async -> Bool {
+        guard (try? await bridgeOutput(["swap", slot, to] + (share ? ["--share"] : []), timeout: 90)) != nil else { return false }
         selectionGeneration += 1
         _ = await refreshActive()
         return true
+    }
+    /// When `id` has spent its Fable share and no unused account has Fable room: an account with
+    /// Fable room whose sessions all run other models, provided `id` still has room for them.
+    /// Trading with it keeps the Fable sessions going and moves only sessions that never need Fable.
+    private func fableShare(_ id: String, slots: [String: String], current: String?, now: Double) -> String? {
+        let mine = sessions.filter { $0.accountID == id }
+        guard mine.contains(where: \.onFable), let account = config.accounts.first(where: { $0.id == id }),
+              Planner.best([account], usage: plannable, active: nil, now: now, ignoringModelLimits: true) == id else { return nil }
+        let candidates = config.accounts.filter { other in
+            let theirs = sessions.filter { $0.accountID == other.id }
+            // New commands follow the selector, so its account never trades this way.
+            return other.provider == .claude && other.id != id && other.id != current && !signingIn.contains(other.id)
+                && !failing.contains(other.id) && slots.values.contains(other.id)
+                && !theirs.isEmpty && theirs.allSatisfy { $0.model != nil && !$0.onFable }
+                && slots.values.filter({ $0 == other.id }).count == 1
+        }
+        return Planner.best(candidates, usage: plannable, active: nil, now: now)
     }
     /// Keeps the Mac's existing login as a library account so switching never loses it.
     func adoptMacLogin(_ provider: AgentProvider) async {
@@ -793,8 +810,13 @@ final class AccountStore {
                 if !account.allowAuto || signingIn.contains(id) { continue }
                 // Trade only with an account no session is using, so no session lands on the full one.
                 let free = config.accounts.filter { $0.provider == provider && ($0.id == id || (!busy().contains($0.id) && !signingIn.contains($0.id))) }
-                guard let best = Planner.best(free, usage: plannable, active: id, now: now), best != id else { continue }
-                if await swap(slot, best) {
+                var share = false
+                var target = Planner.best(free, usage: plannable, active: id, now: now)
+                if target == nil, let pick = fableShare(id, slots: slots, current: current, now: now) { target = pick; share = true }
+                guard let best = target, best != id else { continue }
+                if await swap(slot, best, share: share) {
+                    // The Opus sessions that had `best` continue on the login this slot gave up.
+                    if share, let theirs = slots.first(where: { $0.value == best })?.key { slots[theirs] = id }
                     slots[slot] = best
                     notify("Now playing: \(name(best))", "\(name(id)) is near its limit. Its running sessions continue as \(name(best)) within a minute, nothing to restart.")
                 }
