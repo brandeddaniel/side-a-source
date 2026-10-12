@@ -811,7 +811,12 @@ final class AccountStore {
                 // Trade only with an account no session is using, so no session lands on the full one.
                 let free = config.accounts.filter { $0.provider == provider && ($0.id == id || (!busy().contains($0.id) && !signingIn.contains($0.id))) }
                 var share = false
-                var target = Planner.best(free, usage: plannable, active: id, now: now)
+                // Sessions that all run other models don't need Fable room, here or where they go.
+                let theirs = sessions.filter { $0.accountID == id }
+                let fableFree = !theirs.isEmpty && theirs.allSatisfy { $0.model != nil && !$0.onFable }
+                var target = fableFree
+                    ? Planner.best(free, usage: self.plannable, active: id, now: now, ignoringModelLimits: true)
+                    : Planner.best(free, usage: plannable, active: id, now: now)
                 if target == nil, let pick = fableShare(id, slots: slots, current: current, now: now) { target = pick; share = true }
                 guard let best = target, best != id else { continue }
                 if await swap(slot, best, share: share) {
