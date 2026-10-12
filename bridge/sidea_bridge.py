@@ -1265,11 +1265,11 @@ def opus_fallback_installed():
 PROFILE_IN_ENV = re.compile(r"CLAUDE_SECURESTORAGE_CONFIG_DIR=(\S.*?/profiles/([0-9a-f-]{36}))")
 
 
-def transcript_tail(session_id):
+def transcript_tail(session_id, size=262144):
     for path in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
         with open(path, "rb") as stream:
             stream.seek(0, os.SEEK_END)
-            stream.seek(max(0, stream.tell() - 262144))
+            stream.seek(max(0, stream.tell() - size))
             return stream.read().splitlines()
     return []
 
@@ -1292,17 +1292,21 @@ def session_titles(session):
 
 
 def session_state(session_id):
-    """Model and effort of the session's latest main-thread reply, from the tail of its transcript."""
-    for line in reversed(transcript_tail(session_id)):
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if entry.get("type") != "assistant" or entry.get("isSidechain"):
-            continue
-        model = (entry.get("message") or {}).get("model")
-        if model and not model.startswith("<"):
-            return model, entry.get("effort")
+    """Model and effort of the session's latest main-thread reply, from the tail of its transcript.
+    Long tool results can fill the usual tail, so a wider one is read only when needed."""
+    for size in (262144, 8 << 20):
+        for line in reversed(transcript_tail(session_id, size)):
+            if b'"assistant"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get("type") != "assistant" or entry.get("isSidechain"):
+                continue
+            model = (entry.get("message") or {}).get("model")
+            if model and not model.startswith("<"):
+                return model, entry.get("effort")
     return None, None
 
 

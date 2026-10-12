@@ -293,6 +293,13 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.session_limit('f'),('fable',bridge.epoch('2026-10-07T20:00:00Z')))
             self.assertEqual(bridge.session_limit('w')[0],'weekly')
             self.assertEqual(bridge.session_limit('r'),(None,None))  # a later normal reply: recovered
+    def test_model_is_found_behind_long_tool_output(self):
+        home=self.root/'home'; project=home/'.claude/projects/-x'; project.mkdir(parents=True)
+        reply=json.dumps({'type':'assistant','effort':'high','message':{'model':'claude-opus-5-5','content':[]}})
+        output=json.dumps({'type':'user','message':{'content':'x'*400000}})
+        (project/'s.jsonl').write_text(reply+'\n'+output+'\n')
+        with patch.object(Path,'home',return_value=home):
+            self.assertEqual(bridge.session_state('s'),('claude-opus-5-5','high'))
     def test_activity_tells_a_finished_turn_from_a_stuck_one(self):
         home=self.root/'home'; project=home/'.claude/projects/-x'; project.mkdir(parents=True)
         entry=lambda kind,ts,**extra: json.dumps({'type':kind,'timestamp':ts,**extra})
