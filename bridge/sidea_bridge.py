@@ -1949,7 +1949,10 @@ def main():
         with selection_lock(root):
             read_secret.cache_clear()
             held = token_email(root, read_secret(home_service(root, account)))
-            if held and held != account.get("email", "").casefold() and account_for_email(config, held):
+            owner = account_for_email(config, held) if held and held != account.get("email", "").casefold() else None
+            # Only the other account's own login blocks; a stray second copy of it (say from a
+            # `/login` typed in a session here) is replaced, since that account's home is elsewhere.
+            if owner and home_slot(root, owner) == home_slot(root, account):
                 raise ValueError(f"{account['name']}'s slot holds another account's login; sign in again after Side A frees it.")
             slot = home_slot(root, account)
             env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = slot_selector(root, slot)
