@@ -348,6 +348,16 @@ class BridgeTests(unittest.TestCase):
             bridge.atomic_json(home/'.claude/settings.json',{'statusLine':theirs})
             bridge.set_live(self.root,True); bridge.set_live(self.root,False)
             self.assertEqual(bridge.read_json(home/'.claude/settings.json'),{'statusLine':theirs})
+    def test_a_redrawn_idle_statusline_is_as_old_as_its_last_reply(self):
+        other=account('Other'); config={'accounts':[other]}
+        transcript=self.root/'t.jsonl'; transcript.write_text('{}\n')
+        os.utime(transcript,(time.time()-7200,time.time()-7200))
+        folder=bridge.live_dir(self.root); folder.mkdir(parents=True)
+        (folder/f"{other['id']}.json").write_text(json.dumps({'transcript_path':str(transcript),
+            'rate_limits':{'five_hour':{'used_percentage':33,'resets_at':2000000000}}}))
+        with patch.object(bridge,'mac_email',return_value=None):
+            live=bridge.live_limits(self.root,config)
+        self.assertAlmostEqual(live[other['id']]['at'],time.time()-7200,delta=5)
     def test_report_counts_each_response_once_per_day_and_project(self):
         folder=Path(self.temp.name)/'home/.claude/projects/p'; folder.mkdir(parents=True)
         line=lambda mid,ts,out:json.dumps({'timestamp':ts,'cwd':'/work/app','requestId':'r'+mid,'message':{'id':mid,'model':'m','usage':{'input_tokens':1,'output_tokens':out}}})

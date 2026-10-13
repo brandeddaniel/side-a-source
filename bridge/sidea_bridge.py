@@ -1814,7 +1814,13 @@ def live_limits(root, config):
             account = next((a for a in config.get("accounts", []) if provider_of(a) == "claude" and home_slot(root, a) == name), None)
             with open(path) as stream:
                 at = os.fstat(stream.fileno()).st_mtime
-                limits = json.load(stream).get("rate_limits") or {}
+                payload = json.load(stream)
+            limits = payload.get("rate_limits") or {}
+            # A statusline redraws an idle session with the limits from its last reply, and every
+            # session on a slot writes the same file, so the reading is as old as that reply: when
+            # the session's transcript last changed, not when the file was written.
+            with contextlib.suppress(OSError, TypeError, KeyError):
+                at = min(at, os.stat(payload["transcript_path"]).st_mtime)
             windows = [{"id": key, "label": label, "percent": float(limits[key]["used_percentage"]),
                         "resetsAt": epoch(limits[key].get("resets_at"))}
                        for key, label in WINDOW_LABELS.items() if isinstance(limits.get(key), dict)]
