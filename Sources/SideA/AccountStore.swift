@@ -818,6 +818,12 @@ final class AccountStore {
                     ? Planner.best(free, usage: self.plannable, active: id, now: now, ignoringModelLimits: true)
                     : Planner.best(free, usage: plannable, active: id, now: now)
                 if target == nil, let pick = fableShare(id, slots: slots, current: current, now: now) { target = pick; share = true }
+                // No Fable room anywhere and this account is about to stop every session on it:
+                // move anyway, so the sessions on other models keep running.
+                if target == nil, !fableFree, let mine = self.plannable[id],
+                   [mine.fiveHour, mine.weekly].contains(where: { ($0?.resetsAt ?? 0) > now && ($0?.percent ?? 0) >= Planner.limited }) {
+                    target = Planner.best(free, usage: self.plannable, active: id, now: now, ignoringModelLimits: true)
+                }
                 guard let best = target, best != id else { continue }
                 if await swap(slot, best, share: share) {
                     // The Opus sessions that had `best` continue on the login this slot gave up.
