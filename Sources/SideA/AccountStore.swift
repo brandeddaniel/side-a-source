@@ -791,7 +791,8 @@ final class AccountStore {
             let plannable = planning(self.plannable)
             // Fable spent on every account (known, not merely unreadable): new commands use Opus for Fable.
             let fableMaybeLeft = accounts.contains { account in
-                account.ready && account.allowAuto
+                // A signed-out account's last reading can't be used, so its Fable doesn't count.
+                account.ready && account.allowAuto && usage[account.id]?.stale != true
                     && !(plannable[account.id].map { Planner.isSpent($0, onFable: false, now: now) } ?? false)
                     && (usage[account.id]?.fable.map { $0.percent < Planner.limited || ($0.resetsAt ?? 0) <= now } ?? true)
             }
