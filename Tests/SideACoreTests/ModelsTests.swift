@@ -253,3 +253,13 @@ import Testing
     let window = try JSONDecoder().decode(UsageWindow.self, from: Data(json.utf8))
     #expect(window.id == "model:fable" && AccountUsage(windows: [window]).fable?.percent == 100)
 }
+
+@Test func aLiveReadingFromAnotherLoginIsRecognizedByItsWeeklyReset() {
+    let now = 1_000_000.0
+    let mine = AccountUsage(windows: [UsageWindow(id: "seven_day", label: "", percent: 3, resetsAt: now + 6 * 86_400)])
+    let other = [UsageWindow(id: "seven_day", label: "", percent: 37, resetsAt: now + 2 * 86_400)]
+    let same = [UsageWindow(id: "seven_day", label: "", percent: 4, resetsAt: now + 6 * 86_400 + 1)]
+    #expect(Planner.belongsElsewhere(other, known: mine, now: now))
+    #expect(!Planner.belongsElsewhere(same, known: mine, now: now))
+    #expect(!Planner.belongsElsewhere(other, known: nil, now: now))
+}

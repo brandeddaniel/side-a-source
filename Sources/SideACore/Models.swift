@@ -482,6 +482,14 @@ public enum Planner {
         return pick?.id
     }
 
+    /// A live reading whose weekly window resets at a different time than the account's own
+    /// (still running) week came from another account's login.
+    public static func belongsElsewhere(_ windows: [UsageWindow], known: AccountUsage?, now: Double) -> Bool {
+        guard let mine = known?.weekly?.resetsAt, mine > now,
+              let theirs = windows.first(where: { $0.id == "seven_day" })?.resetsAt else { return false }
+        return abs(mine - theirs) > 3600
+    }
+
     /// A 5-hour window only starts on the first message; starting it early makes it reset early.
     public static func shouldPrime(_ account: Account, usage: AccountUsage?, now: Double) -> Bool {
         guard account.ready, account.allowAuto, let usage, !usage.stale else { return false }

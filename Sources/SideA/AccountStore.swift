@@ -622,6 +622,9 @@ final class AccountStore {
         var changed = false
         for (id, live) in value.live ?? [:] { liveAt[id] = live.at }
         for (id, live) in value.live ?? [:] where live.at > (readAt[id]?.timeIntervalSince1970 ?? 0) {
+            // Each account's week resets at its own time. A reply that began before a trade reports
+            // the previous login's limits; its weekly reset gives it away, so it is not credited here.
+            if Planner.belongsElsewhere(live.windows, known: usage[id], now: Date().timeIntervalSince1970) { continue }
             var merged = usage[id] ?? AccountUsage(windows: [])
             for window in live.windows {
                 if let index = merged.windows.firstIndex(where: { $0.id == window.id }) { merged.windows[index] = window } else { merged.windows.append(window) }
