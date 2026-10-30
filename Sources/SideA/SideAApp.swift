@@ -4,6 +4,8 @@ import SwiftUI
 struct SideAApp: App {
     @State private var store: AccountStore
     init() {
+        // Each copy would drive Autopilot and swap logins on its own, so only one may run.
+        if !ProcessInfo.processInfo.arguments.contains("--demo"), !Self.claimOnlyCopy() { exit(0) }
         let store = AccountStore()
         _store = State(initialValue: store)
         DispatchQueue.main.async { store.setMenuBarOnly(store.config.menuBarOnly) }
@@ -39,6 +41,13 @@ struct SideAApp: App {
         }
         .menuBarExtraStyle(.window)
         Settings { SettingsView(store: store) }
+    }
+    /// The lock lasts as long as this process, so it clears by itself after a quit or a crash.
+    private static func claimOnlyCopy() -> Bool {
+        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/SideA")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let lock = open(folder.appendingPathComponent("running.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        return lock < 0 || flock(lock, LOCK_EX | LOCK_NB) == 0
     }
     /// The active Claude account's tightest limit: 5-hour, weekly or a model's weekly (Fable), whichever is closer.
     private var menuPercent: Int? {

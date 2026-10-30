@@ -134,10 +134,12 @@ final class AccountStore {
         } else if FileManager.default.fileExists(atPath: configURL.path) {
             do { config = try PrivateFile.read(Configuration.self, from: configURL).validated() }
             catch { self.error = error.localizedDescription; startupError = true }
-        } else if Bundle.main.bundleURL.pathExtension == "app" {
+        } else if Bundle.main.bundleURL.pathExtension == "app", !Self.startsFromLaunchAgent {
             // First launch: Autopilot only helps while running, so start with the Mac.
             try? SMAppService.mainApp.register()
         }
+        // A login item on top of the LaunchAgent would start a second copy at login.
+        if !isDemo, Self.startsFromLaunchAgent, SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
         if !isDemo, let cache = try? PrivateFile.read(UsageCache.self, from: usageCacheURL) {
             // Show the last numbers at once and keep each account on its normal polling schedule.
             usage = cache.usage; usageAt = cache.at
@@ -283,6 +285,10 @@ final class AccountStore {
         config.accounts[index].name = name
         guard persist() else { config.accounts[index].name = previous; return false }
         return true
+    }
+    /// This fork starts from a LaunchAgent, which also restarts it after a crash.
+    static var startsFromLaunchAgent: Bool {
+        FileManager.default.fileExists(atPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/com.local.sidea.plist").path)
     }
     func setLaunchAtLogin(_ enabled: Bool) {
         do { enabled ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }

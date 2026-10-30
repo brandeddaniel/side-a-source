@@ -590,13 +590,14 @@ struct RuleChip: View {
 
 struct GeneralSettings: View {
     @Bindable var store: AccountStore
-    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var launchAtLogin = AccountStore.startsFromLaunchAgent || SMAppService.mainApp.status == .enabled
     @AppStorage("tourSeen") private var tourSeen = false
     @AppStorage("playerEnabled") private var playerEnabled = false
     var body: some View {
         Form {
             Section {
                 Toggle("Open at login", isOn: Binding(get: { launchAtLogin }, set: { store.setLaunchAtLogin($0); launchAtLogin = SMAppService.mainApp.status == .enabled }))
+                    .disabled(AccountStore.startsFromLaunchAgent)
                 Toggle("Show only in the menu bar", isOn: Binding(get: { store.config.menuBarOnly }, set: { store.setMenuBarOnly($0) }))
                 LabeledContent("Guided tour") { Button("Show again") { tourSeen = false } }
                 Toggle(isOn: $playerEnabled) {
