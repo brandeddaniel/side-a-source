@@ -426,6 +426,26 @@ final class AccountStore {
         }
         return Planner.best(candidates, usage: plannable, active: nil, now: now)
     }
+    /// No free account has Fable room, but a busy one does and runs fewer Fable sessions than this
+    /// slot. Its sessions move to a free account first, so the larger Fable group can take its login.
+    private func makeRoom(_ id: String, slots: inout [String: String], free: [Account], usage: [String: AccountUsage],
+                          current: String?, now: Double) async -> String? {
+        let onFable = { (account: String) in self.sessions.filter { $0.accountID == account && $0.onFable }.count }
+        let mine = onFable(id)
+        guard mine > 0 else { return nil }
+        let candidates = config.accounts.filter { other in
+            other.provider == .claude && other.id != id && other.id != current && !signingIn.contains(other.id)
+                && !failing.contains(other.id) && slots.values.filter({ $0 == other.id }).count == 1 && onFable(other.id) < mine
+        }
+        guard let room = Planner.best(candidates, usage: usage, active: nil, now: now),
+              let theirSlot = slots.first(where: { $0.value == room })?.key,
+              let refuge = Planner.best(free, usage: plannable, active: nil, now: now, ignoringModelLimits: true),
+              refuge != room, await swap(theirSlot, refuge) else { return nil }
+        slots[theirSlot] = refuge
+        let name = { (id: String) in self.config.accounts.first { $0.id == id }?.name ?? "" }
+        notify("Making room on \(name(room))", "Its sessions continue as \(name(refuge)), so \(name(id))'s Fable sessions can move there.")
+        return room
+    }
     /// Keeps the Mac's existing login as a library account so switching never loses it.
     func adoptMacLogin(_ provider: AgentProvider) async {
         guard let email = unknownLogins[provider], !isDemo else { return }
@@ -828,6 +848,8 @@ final class AccountStore {
                     ? Planner.best(free, usage: self.plannable, active: id, now: now, ignoringModelLimits: true)
                     : Planner.best(free, usage: plannable, active: id, now: now)
                 if target == nil, let pick = fableShare(id, slots: slots, current: current, now: now) { target = pick; share = true }
+                if target == nil, !fableFree, let pick = await makeRoom(id, slots: &slots, free: free.filter { $0.id != id },
+                                                                        usage: plannable, current: current, now: now) { target = pick }
                 // No Fable room anywhere and this account is about to stop every session on it:
                 // move anyway, so the sessions on other models keep running.
                 if target == nil, !fableFree, let mine = self.plannable[id],
