@@ -51,6 +51,8 @@ public struct Configuration: Codable, Equatable, Sendable {
     public var liveLimits: Bool?
     /// The 5-hour or weekly percentage at which Autopilot moves off an account. Nil means 95.
     public var swapAt: Double?
+    /// The account the user chose for when the selector's account runs out; cleared once used.
+    public var nextUp: String?
     public init() {}
 
     public var selected: Account? { accounts.first { $0.id == selectedID } }

@@ -260,6 +260,8 @@ final class AccountStore {
             .split(separator: "-").joined(separator: "-")
         return slug.isEmpty ? "account" : slug
     }
+    /// Autopilot moves the selector's sessions here once their account runs out; nil clears the choice.
+    func setNextUp(_ id: String?) { config.nextUp = id; persist() }
     func setAuto(_ id: String, _ allowed: Bool) {
         guard let index = config.accounts.firstIndex(where: { $0.id == id }) else { return }
         config.accounts[index].allowAuto = allowed; persist()
@@ -425,6 +427,23 @@ final class AccountStore {
                 && slots.values.filter({ $0 == other.id }).count == 1
         }
         return Planner.best(candidates, usage: plannable, active: nil, now: now)
+    }
+    /// Moves `slot` to the user's next account; a smaller group using it moves to a free account first.
+    private func moveToNext(_ slot: String, from id: String, to next: String, slots: inout [String: String],
+                            free: [Account], now: Double) async -> Bool {
+        if let theirSlot = slots.first(where: { $0.value == next })?.key {
+            guard slots.values.filter({ $0 == next }).count == 1,
+                  sessions.filter({ $0.accountID == next }).count < sessions.filter({ $0.accountID == id }).count,
+                  let refuge = Planner.best(free.filter { $0.id != id }, usage: plannable, active: nil, now: now, ignoringModelLimits: true),
+                  await swap(theirSlot, refuge) else { return false }
+            slots[theirSlot] = refuge
+        }
+        guard await swap(slot, next) else { return false }
+        slots[slot] = next
+        setNextUp(nil)
+        let name = { (id: String) in self.config.accounts.first { $0.id == id }?.name ?? "" }
+        notify("Now playing: \(name(next))", "\(name(id)) is near its limit. Its running sessions continue as your chosen next account, \(name(next)).")
+        return true
     }
     /// No free account has Fable room, but a busy one does and runs fewer Fable sessions than this
     /// slot. Its sessions move to a free account first, so the larger Fable group can take its login.
@@ -831,6 +850,15 @@ final class AccountStore {
             // trades; only new commands move.
             var slots = busyLogins ?? [:]
             let busy = { Set(slots.values).union([current].compactMap { $0 }) }
+            // The user's next account, while it has room: nothing moves off the selector's account until it runs out.
+            let nextUp = config.nextUp.flatMap { next in config.accounts.first { $0.id == next && $0.id != current && $0.provider == provider } }
+                .flatMap { Planner.best([$0], usage: plannable, active: nil, now: now) }
+            let usable = { (account: Account) in
+                let fableFree = { let theirs = self.sessions.filter { $0.accountID == account.id }
+                    return !theirs.isEmpty && theirs.allSatisfy { $0.model != nil && !$0.onFable } }()
+                return Planner.best([account], usage: fableFree ? self.plannable : plannable, active: account.id, now: now,
+                                    ignoringModelLimits: fableFree) == account.id
+            }
             for slot in slots.keys.sorted(by: { slots[$0] == current && slots[$1] != current }) {
                 // Settings may have changed during the last trade.
                 guard config.smartMode, let id = slots[slot], let account = config.accounts.first(where: { $0.id == id }) else { continue }
@@ -840,6 +868,10 @@ final class AccountStore {
                 if !account.allowAuto || signingIn.contains(id) { continue }
                 // Trade only with an account no session is using, so no session lands on the full one.
                 let free = config.accounts.filter { $0.provider == provider && ($0.id == id || (!busy().contains($0.id) && !signingIn.contains($0.id))) }
+                if id == current, let next = nextUp {
+                    if usable(account) { continue }
+                    if await moveToNext(slot, from: id, to: next, slots: &slots, free: free, now: now) { continue }
+                }
                 var share = false
                 // Sessions that all run other models don't need Fable room, here or where they go.
                 let theirs = sessions.filter { $0.accountID == id }
@@ -865,7 +897,9 @@ final class AccountStore {
                 }
             }
             // New commands: if the account they use is still full (no trade, or no sessions on it), point them elsewhere.
-            if config.smartMode, shellSwitching, let current = activeIDs[provider], !signingIn.contains(current),
+            let waiting = nextUp != nil && current == activeIDs[provider]
+                && config.accounts.first(where: { $0.id == current }).map(usable) == true
+            if config.smartMode, shellSwitching, !waiting, let current = activeIDs[provider], !signingIn.contains(current),
                config.accounts.first(where: { $0.id == current })?.allowAuto != false,
                !(failing.contains(current) && usage[current]?.stale != true),
                let best = Planner.best(config.accounts.filter { $0.provider == provider && ($0.id == current || !busy().contains($0.id)) },
