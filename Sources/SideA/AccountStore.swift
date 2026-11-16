@@ -621,7 +621,8 @@ final class AccountStore {
         // While sessions report live limits, the endpoint is only needed for what they can't see
         // (Fable, paid usage, use on other devices).
         let live = now - (liveAt[account.id] ?? 0) < 600
-        let interval: TimeInterval = live ? 900 : isActive(account) ? (nearLimit(account.id) ? 90 : 180) : 600
+        // A spent Fable limit can come back early (a reset), and only the endpoint shows it.
+        let interval: TimeInterval = live ? (fableSpent(account.id) ? 180 : 900) : isActive(account) ? (nearLimit(account.id) ? 90 : 180) : 600
         return Date().timeIntervalSince(usageAt[account.id] ?? .distantPast) >= interval - 1
     }
     /// Minutes until the account's 5-hour limit at its recent pace.
