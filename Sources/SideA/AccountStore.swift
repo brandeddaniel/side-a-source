@@ -406,7 +406,11 @@ final class AccountStore {
     }
     /// Trades the login in `slot` with `to`'s, so every session reading it continues as `to`; see bridge swap().
     private func swap(_ slot: String, _ to: String, share: Bool = false) async -> Bool {
-        guard (try? await bridgeOutput(["swap", slot, to] + (share ? ["--share"] : []), timeout: 90)) != nil else { return false }
+        do { _ = try await bridgeOutput(["swap", slot, to] + (share ? ["--share"] : []), timeout: 90) } catch {
+            let name = config.accounts.first { $0.id == to }?.name ?? to
+            autopilotNote(slot, "swap to \(name)\(share ? " (shared)" : "") failed: \(error.localizedDescription)")
+            return false
+        }
         selectionGeneration += 1
         _ = await refreshActive()
         return true
@@ -457,9 +461,11 @@ final class AccountStore {
                 && !failing.contains(other.id) && slots.values.filter({ $0 == other.id }).count == 1 && onFable(other.id) < mine
         }
         guard let room = Planner.best(candidates, usage: usage, active: nil, now: now),
-              let theirSlot = slots.first(where: { $0.value == room })?.key,
-              let refuge = Planner.best(free, usage: plannable, active: nil, now: now, ignoringModelLimits: true),
-              refuge != room, await swap(theirSlot, refuge) else { return nil }
+              let theirSlot = slots.first(where: { $0.value == room })?.key else { return nil }
+        guard let refuge = Planner.best(free, usage: plannable, active: nil, now: now, ignoringModelLimits: true), refuge != room else {
+            autopilotNote(theirSlot, "can't free \(room) for a larger Fable group: no free account has weekly room"); return nil
+        }
+        guard await swap(theirSlot, refuge) else { return nil }
         slots[theirSlot] = refuge
         let name = { (id: String) in self.config.accounts.first { $0.id == id }?.name ?? "" }
         notify("Making room on \(name(room))", "Its sessions continue as \(name(refuge)), so \(name(id))'s Fable sessions can move there.")
@@ -728,6 +734,22 @@ final class AccountStore {
     var actingOn: Set<Int> = []
     @ObservationIgnored private var stuckNotified: Set<Int> = []
     @ObservationIgnored private var limitReported: [Int: Double] = [:]
+    @ObservationIgnored private var lastAutopilotNote: [String: String] = [:]
+    /// Why Autopilot moved a slot or left it, in runtime/autopilot.log; a slot's note is written only when it changes.
+    private func autopilotNote(_ slot: String, _ text: String) {
+        guard lastAutopilotNote[slot] != text else { return }
+        lastAutopilotNote[slot] = text
+        let url = root.appendingPathComponent("runtime/autopilot.log")
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 1_000_000 {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let line = Data("\(ISO8601DateFormatter().string(from: Date())) \(slot.prefix(8)) \(text)\n".utf8)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile(); handle.write(line); try? handle.close()
+        } else {
+            FileManager.default.createFile(atPath: url.path, contents: line, attributes: [.posixPermissions: 0o600])
+        }
+    }
 
     func setOpusFallback(_ enabled: Bool) async {
         struct State: Decodable { let installed: Bool }
@@ -889,7 +911,14 @@ final class AccountStore {
                    [mine.fiveHour, mine.weekly].contains(where: { ($0?.resetsAt ?? 0) > now && ($0?.percent ?? 0) >= Planner.limited }) {
                     target = Planner.best(free, usage: self.plannable, active: id, now: now, ignoringModelLimits: true)
                 }
-                guard let best = target, best != id else { continue }
+                guard let best = target, best != id else {
+                    if !usable(account) {
+                        let fable = theirs.filter(\.onFable).count
+                        autopilotNote(slot, "\(name(id)) is out of room (\(theirs.count) sessions, \(fable) on Fable) and stays: no account with room is free or can be freed")
+                    }
+                    continue
+                }
+                autopilotNote(slot, "\(name(id)) → \(name(best))\(share ? " (shared)" : "")")
                 if await swap(slot, best, share: share) {
                     // The Opus sessions that had `best` continue on the login this slot gave up.
                     if share, let theirs = slots.first(where: { $0.value == best })?.key { slots[theirs] = id }
