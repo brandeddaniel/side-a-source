@@ -413,6 +413,8 @@ final class AccountStore {
         }
         selectionGeneration += 1
         _ = await refreshActive()
+        // Sessions now run on another account; a later decision in this tick must see that.
+        await refreshSessions()
         return true
     }
     /// When `id` has spent its Fable share and no unused account has Fable room: an account with
@@ -849,7 +851,8 @@ final class AccountStore {
         guard await refreshActive() else { return }
         await refresh(config.accounts.filter { $0.ready && dueForRead($0) }.map(\.id))
         Task { await refreshReport(maxAge: 3600) }
-        Task { await refreshSessions() }
+        // Awaited: the trades below decide by which account each session is on.
+        await refreshSessions()
         // The Fable remap only makes sense while Autopilot steers Terminal; never leave it behind.
         if !config.smartMode || !shellSwitching { await setFableToOpus(false) }
         guard config.smartMode else { return }
