@@ -899,9 +899,13 @@ final class AccountStore {
                 // Sessions that all run other models don't need Fable room, here or where they go.
                 let theirs = sessions.filter { $0.accountID == id }
                 let fableFree = !theirs.isEmpty && theirs.allSatisfy { $0.model != nil && !$0.onFable }
+                // The account new commands start on, while no session uses it: a Fable group may take it,
+                // and new commands follow the group to the slot it lands in.
+                let selector = current.flatMap { c in c == id || slots.values.contains(c) || signingIn.contains(c) ? nil
+                    : config.accounts.first { $0.id == c && $0.provider == provider } }
                 var target = fableFree
                     ? Planner.best(free, usage: self.plannable, active: id, now: now, ignoringModelLimits: true)
-                    : Planner.best(free, usage: plannable, active: id, now: now)
+                    : Planner.best(free + [selector].compactMap { $0 }, usage: plannable, active: id, now: now)
                 if target == nil, let pick = fableShare(id, slots: slots, current: current, now: now) { target = pick; share = true }
                 if target == nil, !fableFree, let pick = await makeRoom(id, slots: &slots, free: free.filter { $0.id != id },
                                                                         usage: plannable, current: current, now: now) { target = pick }
@@ -923,6 +927,8 @@ final class AccountStore {
                     // The Opus sessions that had `best` continue on the login this slot gave up.
                     if share, let theirs = slots.first(where: { $0.value == best })?.key { slots[theirs] = id }
                     slots[slot] = best
+                    // Its login now lives in this slot; point new commands there too.
+                    if best == current { await activate(best) }
                     notify("Now playing: \(name(best))", "\(name(id)) is near its limit. Its running sessions continue as \(name(best)) within a minute, nothing to restart.")
                 }
             }
