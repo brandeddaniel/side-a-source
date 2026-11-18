@@ -464,12 +464,13 @@ public enum Planner {
     }
 
     public static func best(_ candidates: [Account], usage: [String: AccountUsage], active: String?, now: Double,
-                            ignoringModelLimits: Bool = false) -> String? {
+                            ignoringModelLimits: Bool = false, lastResort: Bool = false) -> String? {
         let eligible = candidates.filter { account in
             guard account.ready, account.allowAuto, let value = usage[account.id], !value.stale else { return false }
             // Only move to an account with real room; the active one may run up to the limit.
-            // A new pick also needs room below the switch target, so sessions are not sent to an account about to run out.
-            return hasHeadroom(value, now: now, ignoringModelLimits: ignoringModelLimits) && (account.id == active
+            // A new pick also needs room below the switch target, so sessions are not sent to an account about to run out,
+            // unless the caller's account is already spent: then any room left beats none.
+            return hasHeadroom(value, now: now, ignoringModelLimits: ignoringModelLimits) && (account.id == active || lastResort
                 || ((live(value.fiveHour, now)?.percent ?? 0) < switchTarget
                     && (tightestWeekly(value, now, ignoringModelLimits: ignoringModelLimits)?.percent ?? 0) < switchTarget))
         }

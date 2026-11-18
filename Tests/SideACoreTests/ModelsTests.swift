@@ -87,6 +87,8 @@ import Testing
     table[soon.id] = usage(93, now + 2 * hour, 40, now + 24 * hour)
     #expect(Planner.best([soon, full], usage: table, active: full.id, now: now) == nil)
     #expect(Planner.best([soon, full], usage: table, active: soon.id, now: now) == soon.id)
+    // Once the caller's account is spent, any room left beats none.
+    #expect(Planner.best([soon, full], usage: table, active: full.id, now: now, lastResort: true) == soon.id)
     table[soon.id] = usage(10, now + 2 * hour, 40, now + 6 * 24 * hour)
     // An expired window counts as not started.
     #expect(Planner.shouldPrime(later, usage: table[later.id], now: now))

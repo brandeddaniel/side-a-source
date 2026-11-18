@@ -912,6 +912,11 @@ final class AccountStore {
                 if target == nil, let pick = fableShare(id, slots: slots, current: current, now: now) { target = pick; share = true }
                 if target == nil, !fableFree, let pick = await makeRoom(id, slots: &slots, free: free.filter { $0.id != id },
                                                                         usage: plannable, current: current, now: now) { target = pick }
+                // This account's Fable is spent and nothing is below the switch target: take whatever
+                // Fable room is left, so the Fable sessions keep running a while longer.
+                if target == nil, !fableFree, let mine = plannable[id], Planner.isSpent(mine, onFable: true, now: now) {
+                    target = Planner.best(free + [selector].compactMap { $0 }, usage: plannable, active: id, now: now, lastResort: true)
+                }
                 // No Fable room anywhere and this account is about to stop every session on it:
                 // move anyway, so the sessions on other models keep running.
                 if target == nil, !fableFree, let mine = self.plannable[id],
