@@ -1378,6 +1378,8 @@ def live_sessions(root, config):
     mac = None
     owners = {}
     sessions = []
+    # When each slot last changed login: a limit a session hit before then was another account's.
+    swapped = read_json(swapped_path(root), {}) or {}
     for path in (Path.home() / ".claude" / "sessions").glob("*.json"):
         data = read_json_quiet(path, None)
         pid = data.get("pid") if isinstance(data, dict) else None
@@ -1399,7 +1401,9 @@ def live_sessions(root, config):
                 owned = (account_for_email(config, email) or {}).get("id") if email else None
                 owners[slot] = owned or (slot if slot in ids and not email else None)
             account = owners[slot]
+            moved = swapped.get(slot, 0)
         else:
+            moved = 0
             if mac is None:
                 try:
                     mac = (account_for_email(config, mac_email(root)) or {}).get("id") or ""
@@ -1409,7 +1413,8 @@ def live_sessions(root, config):
         since = data.get("statusUpdatedAt")
         limit, limit_at = session_limit(data["sessionId"])
         activity, ended = session_activity(data["sessionId"])
-        sessions.append({"limitHit": limit, "limitAt": limit_at, "lastActivity": activity, "turnEnded": ended,
+        sessions.append({"limitHit": limit, "limitAt": limit_at,
+                         "limitHere": bool(limit and limit_at and limit_at > moved), "lastActivity": activity, "turnEnded": ended,
                          "runningJobs": running_jobs(pid),"pid": pid, "name": data.get("name"), "status": data.get("status"), "entrypoint": data.get("entrypoint"),
                          "statusSince": since / 1000 if isinstance(since, (int, float)) else None,
                          "model": session_model(data["sessionId"]), "accountID": account})

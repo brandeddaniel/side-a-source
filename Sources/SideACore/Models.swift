@@ -156,6 +156,8 @@ public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
     /// The limit its latest reply says it hit ("fable", "session", "weekly"), and when.
     public var limitHit: String?
     public var limitAt: Double?
+    /// The limit was hit on the login the session has now, not on one it was moved off.
+    public var limitHere: Bool?
     /// Commands it started that are still running; a restart would kill them.
     public var runningJobs: Int?
     /// Side A may exit and resume it: nothing it started is still running.

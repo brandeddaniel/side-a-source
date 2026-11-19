@@ -232,8 +232,8 @@ class BridgeTests(unittest.TestCase):
         with patch.object(Path,'home',return_value=home), patch.object(bridge.subprocess,'run',side_effect=ps), \
              patch.object(bridge,'mac_email',return_value='a@x'), patch.object(bridge,'read_secret',return_value=None):
             result=bridge.live_sessions(self.root,{'accounts':[a,b]})
-        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'runningJobs':1,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
-                                 {'limitHit':None,'limitAt':None,'lastActivity':None,'turnEnded':False,'runningJobs':0,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
+        self.assertEqual(result,[{'limitHit':None,'limitAt':None,'limitHere':False,'lastActivity':None,'turnEnded':False,'runningJobs':1,'pid':101,'name':'n101','status':'busy','entrypoint':None,'statusSince':None,'model':'claude-fable-5-1','accountID':b['id']},
+                                 {'limitHit':None,'limitAt':None,'limitHere':False,'lastActivity':None,'turnEnded':False,'runningJobs':0,'pid':102,'name':'n102','status':'busy','entrypoint':None,'statusSince':None,'model':None,'accountID':a['id']}])
     def test_a_session_is_attributed_to_whoever_its_slot_login_belongs_to(self):
         home=self.root/'home'; sessions=home/'.claude/sessions'; sessions.mkdir(parents=True)
         a={'id':str(uuid.uuid4()),'name':'A','email':'a@x'}; b={'id':str(uuid.uuid4()),'name':'B','email':'b@x'}

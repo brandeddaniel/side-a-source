@@ -596,7 +596,23 @@ final class AccountStore {
         if issues[id] == "idle" { self.error = "\(config.accounts.first { $0.id == id }?.name ?? "This account") could not be renewed. Sign in to it again." }
     }
     /// What Autopilot may act on: accounts with a trustworthy latest reading.
-    private var plannable: [String: AccountUsage] { usage.filter { !failing.contains($0.key) } }
+    private var plannable: [String: AccountUsage] { withLimitEvidence(usage.filter { !failing.contains($0.key) }) }
+    /// A session's limit error is proof the limit is spent, even while the usage endpoint still shows
+    /// room (it lags, or answers 429). It holds for an hour after the error, unless a later reading
+    /// shows that limit well clear of it (a reset).
+    private func withLimitEvidence(_ values: [String: AccountUsage]) -> [String: AccountUsage] {
+        let now = Date().timeIntervalSince1970
+        var values = values
+        for session in sessions where session.limitHere == true {
+            guard let id = session.accountID, let limit = session.limitHit, let at = session.limitAt,
+                  now - at < 3600, values[id] != nil else { continue }
+            let window = limit == "fable" ? "model:fable" : limit == "weekly" ? "seven_day" : "five_hour"
+            let readLater = (readAt[id]?.timeIntervalSince1970 ?? 0) > at
+            if readLater, let percent = values[id]?.windows.first(where: { $0.id == window })?.percent, percent < 50 { continue }
+            values[id] = Planner.withEvidence(values[id], limit: limit, at: at, readAt: 0, now: now)
+        }
+        return values
+    }
     /// True while Claude Code is running Fable and Autopilot follows it.
     var fableMode: Bool { config.followFable != false && claudeModel?.localizedCaseInsensitiveContains("fable") == true }
     /// Usage as Autopilot ranks Claude accounts: through the Fable cap while Fable is in use.
